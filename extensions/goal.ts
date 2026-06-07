@@ -270,6 +270,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 	let waitingForUser = false;
 	let waitingReason: string | undefined;
 	let lastReview: GoalReviewRecord | undefined;
+	let pendingGoalContinuations = 0;
 
 	function syncUi(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
@@ -341,21 +342,27 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		ctx.ui.notify(lines.join("\n"), "info");
 	}
 
-	function sendGoalContinuation(ctx: ExtensionContext): void {
+	function sendGoalContinuation(options: { deliverAs: "followUp" } | { triggerTurn: true }): void {
 		if (!currentGoal || !goalActive || waitingForUser) return;
+		pendingGoalContinuations += 1;
 		pi.sendMessage(
 			{
 				content: buildAutoContinueMessage(currentGoal),
 				customType: GOAL_CONTINUE_MESSAGE_TYPE,
 				display: false,
 			},
-			ctx.isIdle() ? { triggerTurn: true } : { deliverAs: "followUp" },
+			options,
 		);
 	}
 
-	function queueGoalContinuation(ctx: ExtensionContext): void {
+	function startGoalContinuation(): void {
 		if (!currentGoal || !goalActive || waitingForUser) return;
-		sendGoalContinuation(ctx);
+		sendGoalContinuation({ triggerTurn: true });
+	}
+
+	function queueGoalContinuation(): void {
+		if (!currentGoal || !goalActive || waitingForUser) return;
+		sendGoalContinuation({ deliverAs: "followUp" });
 	}
 
 	function setGoal(goal: string, ctx: ExtensionContext): void {
@@ -369,7 +376,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		if (ctx.hasUI && currentGoal) {
 			ctx.ui.notify(`Goal set: ${truncateText(currentGoal, 100)}`, "info");
 		}
-		queueGoalContinuation(ctx);
+		startGoalContinuation();
 	}
 
 	function pauseGoal(ctx: ExtensionContext): void {
@@ -396,7 +403,7 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		persistState();
 		syncUi(ctx);
 		if (ctx.hasUI) ctx.ui.notify("Goal resumed.", "info");
-		queueGoalContinuation(ctx);
+		startGoalContinuation();
 	}
 
 	function clearGoal(ctx: ExtensionContext): void {
@@ -416,8 +423,12 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		waitForIdle(): Promise<void>;
 	}): Promise<void> {
 		if (ctx.mode === "tui") return;
-		if (!ctx.isIdle()) {
+		let attempts = 0;
+		while (pendingGoalContinuations > 0 || !ctx.isIdle()) {
+			attempts += 1;
+			if (attempts >= 128) return;
 			await ctx.waitForIdle();
+			await new Promise<void>((resolve) => setTimeout(resolve, 0));
 		}
 	}
 
@@ -733,6 +744,12 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.on("message_start", async (event) => {
+		if (event.message.role === "custom" && event.message.customType === GOAL_CONTINUE_MESSAGE_TYPE) {
+			pendingGoalContinuations = Math.max(0, pendingGoalContinuations - 1);
+		}
+	});
+
 	pi.on("context", async (event) => {
 		let latestGoalContinueIndex = -1;
 		for (let index = event.messages.length - 1; index >= 0; index--) {
@@ -774,18 +791,18 @@ export default function goalExtension(pi: ExtensionAPI): void {
 		return { systemPrompt: `${event.systemPrompt}\n\n${goalPrompt}` };
 	});
 
-	pi.on("turn_end", async (event, ctx) => {
+	pi.on("turn_end", async (event) => {
 		if (!goalActive || !currentGoal || waitingForUser) return;
 		if (event.message.role !== "assistant") return;
 		if (event.message.stopReason !== "stop") return;
-		queueGoalContinuation(ctx);
+		queueGoalContinuation();
 	});
 
 	pi.on("session_start", async (event, ctx) => {
 		reconstructState(ctx);
 		syncUi(ctx);
 		if (ctx.mode === "tui" && event.reason !== "reload" && currentGoal && goalActive && !waitingForUser) {
-			queueGoalContinuation(ctx);
+			startGoalContinuation();
 		}
 	});
 
