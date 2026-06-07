@@ -1,0 +1,25 @@
+{
+  "name": "moder-pi-plugins",
+  "version": "0.1.0",
+  "description": "Personal pi plugin collection with an infinite provider retry extension.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE",
+    "AGENTS.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/*.ts"
+    ]
+  }
+}
