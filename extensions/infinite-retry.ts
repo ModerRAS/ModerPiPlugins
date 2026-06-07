@@ -52,7 +52,7 @@ function readConfig(): RetryConfig {
 		apis: parseList(process.env.PI_INFINITE_RETRY_APIS),
 		providers: parseList(process.env.PI_INFINITE_RETRY_PROVIDERS),
 		baseDelayMs: parsePositiveInteger(process.env.PI_INFINITE_RETRY_BASE_DELAY_MS, 2000),
-		maxDelayMs: parsePositiveInteger(process.env.PI_INFINITE_RETRY_MAX_DELAY_MS, 30000),
+		maxDelayMs: parsePositiveInteger(process.env.PI_INFINITE_RETRY_MAX_DELAY_MS, 3600000),
 		maxAttempts: parseOptionalPositiveInteger(process.env.PI_INFINITE_RETRY_MAX_ATTEMPTS),
 		debug: process.env.PI_INFINITE_RETRY_DEBUG === "1",
 	};

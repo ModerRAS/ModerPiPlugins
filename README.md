@@ -26,7 +26,7 @@ pi install /absolute/path/to/ModerPiPlugins
 
 - 默认对“当前已注册的 API provider”生效，而不是只写死某一家 provider。
 - 默认对“任何以错误结束的请求”重试，不再依赖具体的 HTTP 状态字或错误关键字。
-- 默认无限重试，退避时间为 `2s -> 4s -> 8s -> ...`，最大封顶 `30s`。
+- 默认无限重试，退避时间为 `2s -> 4s -> 8s -> ...`，最大封顶 `1h`。
 - 不重试以下情况：
   - 用户中断
 
@@ -41,7 +41,7 @@ pi install /absolute/path/to/ModerPiPlugins
 - `PI_INFINITE_RETRY_BASE_DELAY_MS`
   - 首次重试等待时间，默认 `2000`
 - `PI_INFINITE_RETRY_MAX_DELAY_MS`
-  - 退避上限，默认 `30000`
+  - 退避上限，默认 `3600000`（1 小时）
 - `PI_INFINITE_RETRY_MAX_ATTEMPTS`
   - 最大尝试次数；未设置时表示无限，建议在你怀疑会碰到永久性错误时手动设置一个上限
 - `PI_INFINITE_RETRY_APIS`
