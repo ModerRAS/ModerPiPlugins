@@ -5,6 +5,7 @@
 当前已包含：
 
 - `extensions/infinite-retry.ts`：给当前已注册的 provider stream 包一层“无限重试”逻辑。
+- `extensions/goal.ts`：提供类似 Codex `/goal` 的会话级持久目标。
 
 ## 用法
 
@@ -56,6 +57,25 @@ pi install /absolute/path/to/ModerPiPlugins
 ```bash
 PI_INFINITE_RETRY_PROVIDERS=openai,anthropic PI_INFINITE_RETRY_MAX_DELAY_MS=10000 pi -e ./extensions/infinite-retry.ts
 ```
+
+## `/goal`
+
+`/goal` 用来管理当前会话的持久目标，行为尽量贴近 Codex：
+
+- `/goal <内容>`
+  - 设置并激活当前目标
+- `/goal`
+  - 查看当前目标状态
+- `/goal pause`
+  - 暂停目标注入，但保留目标文本
+- `/goal resume`
+  - 恢复目标注入
+- `/goal clear`
+  - 清空目标
+- `/goal set <内容>`
+  - 显式设置目标；用于避免和 `pause` / `resume` / `clear` 等关键字冲突
+
+实现上它是 session 级持久状态：目标会随当前 session 保存和恢复，并在每次真正发给模型前追加到当回合 system prompt 里。
 
 ## 限制说明
 
