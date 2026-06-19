@@ -1,6 +1,7 @@
 import {
 	createAssistantMessageEventStream,
 	getApiProvider,
+	isContextOverflow,
 	type Api,
 	type AssistantMessage,
 	type AssistantMessageEvent,
@@ -118,7 +119,11 @@ function shouldWrapModel(config: RetryConfig, model: Model<Api>): boolean {
 }
 
 function isRetryableFailure(message: AssistantMessage): boolean {
-	return message.stopReason === "error";
+	if (message.stopReason !== "error") return false;
+	// overflow 是永久性错误，重试相同 context 必定再次失败。
+	// 跳过重试让 pi 原生 overflow 恢复机制（compaction）接管。
+	if (isContextOverflow(message)) return false;
+	return true;
 }
 
 function getDelayMs(config: RetryConfig, attempt: number): number {
@@ -204,6 +209,10 @@ function createWrappedStream(api: Api, delegate: StreamDelegate, config: RetryCo
 					}
 					await sleepWithAbort(getDelayMs(config, attempt), options?.signal);
 					continue;
+				} else if (config.debug && terminalEvent.type === "error" && isContextOverflow(terminalMessage)) {
+					console.warn(
+						`[infinite-retry] skipping retry for ${model.provider}/${model.id}: context overflow detected, letting pi compaction handle it`,
+					);
 				}
 
 				for (const bufferedEvent of attemptEvents) {

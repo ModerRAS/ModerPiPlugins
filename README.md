@@ -105,3 +105,4 @@ reviewer 默认用一个隔离的 `pi --mode json --no-session` 子进程运行�
 - 如果别的扩展在更晚的时候再次覆盖同一个 API，这个扩展需要等下一次模型切换或下一次请求前，才会重新接管。
 - 因为现在是“任何错误都重试”，所以像错误 API key、quota、上下文溢出、模型名错误这类永久性失败，也可能一直重试到你手动中断，或者直到命中 `PI_INFINITE_RETRY_MAX_ATTEMPTS`。
 - 因为要支持“半路失败后整次重试”，当前实现不再把 token 实时转发给 pi；你看到的内容会在某次尝试成功后一次性出现，或者在最终失败时一次性回放最后一次失败尝试。
+- `infinite-retry` 会识别上下文溢出（overflow）错误并跳过重试，让 pi 的原生 compaction 恢复机制接管。这是因为 overflow 是永久性错误，重试相同 context 必定再次失败。如果配合 `goal` 扩展使用，`goal` 的 context 钩子也会在压缩后防止 assistant 结尾的非法消息序列。

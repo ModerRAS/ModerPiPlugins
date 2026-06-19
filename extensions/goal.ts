@@ -767,6 +767,24 @@ export default function goalExtension(pi: ExtensionAPI): void {
 			}
 			return true;
 		});
+
+		// 防御：过滤后如果最后一条是 assistant（常见于压缩后 goal-continue 被压掉的场景），
+		// 追加一个 user-like 兜底消息，避免 pi 的 continue() / LLM API 拒绝 assistant 结尾的序列。
+		if (
+			currentGoal &&
+			goalActive &&
+			filteredMessages.length > 0 &&
+			(filteredMessages[filteredMessages.length - 1] as GoalContextMessage).role === "assistant"
+		) {
+			filteredMessages.push({
+				role: "custom",
+				customType: GOAL_CONTINUE_MESSAGE_TYPE,
+				content: buildAutoContinueMessage(currentGoal),
+				display: false,
+				timestamp: Date.now(),
+			});
+		}
+
 		if (filteredMessages.length !== event.messages.length) {
 			return { messages: filteredMessages };
 		}
