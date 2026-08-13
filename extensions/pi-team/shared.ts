@@ -1,0 +1,201 @@
+import { readFileSync } from "node:fs";
+import { Type } from "@earendil-works/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+export type TeamRole = "boss" | "lead" | "worker";
+export type AgentStatus = "starting" | "running" | "idle" | "recovering" | "cancelled" | "failed";
+
+export interface TeamInstanceConfig {
+	actorEpoch: string;
+	agentId: string;
+	departmentId?: string;
+	parentId?: string;
+	role: TeamRole;
+	serverUrl: string;
+	task: string;
+	teamId: string;
+	token: string;
+}
+
+export interface TeamEvent {
+	actorId: string;
+	content: string;
+	departmentId?: string;
+	eventId: string;
+	kind: "message" | "status" | "assignment" | "control" | "error";
+	seq: number;
+	targetIds: string[];
+	taskId?: string;
+	timestamp: string;
+}
+
+export interface AgentRecord {
+	actorEpoch: string;
+	agentId: string;
+	departmentId?: string;
+	name: string;
+	parentId?: string;
+	pid?: number;
+	role: TeamRole;
+	sessionPath?: string;
+	status: AgentStatus;
+	task: string;
+}
+
+export interface TeamSnapshot {
+	agents: AgentRecord[];
+	focusedBossId?: string;
+	teamId: string;
+}
+
+export const TEAM_INSTANCE_FLAG = "team-instance";
+export const TEAM_EVENT_ENTRY = "pi-team-event";
+export const TEAM_STATE_ENTRY = "pi-team-state";
+export const MAX_CHILDREN = 4;
+
+function normalizeText(value: unknown): string {
+	return typeof value === "string" ? value.trim() : "";
+}
+
+export function getMessageText(message: { content?: unknown } | undefined): string {
+	if (!message) return "";
+	if (typeof message.content === "string") return message.content.trim();
+	if (!Array.isArray(message.content)) return "";
+	return message.content
+		.filter((block): block is { type: "text"; text: string } => {
+			if (!block || typeof block !== "object") return false;
+			const item = block as { type?: string; text?: string };
+			return item.type === "text" && typeof item.text === "string";
+		})
+		.map((block) => block.text)
+		.join("\n")
+		.trim();
+}
+
+export function readInstanceConfig(pi: ExtensionAPI): TeamInstanceConfig | undefined {
+	const flagIndex = process.argv.findIndex((arg) => arg === `--${TEAM_INSTANCE_FLAG}` || arg.startsWith(`--${TEAM_INSTANCE_FLAG}=`));
+	const rawArg = flagIndex === -1
+		? undefined
+		: process.argv[flagIndex].includes("=")
+			? process.argv[flagIndex].slice(process.argv[flagIndex].indexOf("=") + 1)
+			: process.argv[flagIndex + 1];
+	const configPath = rawArg ?? pi.getFlag(TEAM_INSTANCE_FLAG);
+	if (typeof configPath !== "string" || !configPath.trim()) return undefined;
+	const parsed = JSON.parse(readFileSync(configPath, "utf8")) as Partial<TeamInstanceConfig>;
+	if (
+		!normalizeText(parsed.agentId) ||
+		!normalizeText(parsed.actorEpoch) ||
+		!normalizeText(parsed.serverUrl) ||
+		!normalizeText(parsed.teamId) ||
+		!normalizeText(parsed.token) ||
+		!normalizeText(parsed.task) ||
+		!(["boss", "lead", "worker"] as const).includes(parsed.role as TeamRole)
+	) {
+		throw new Error(`Invalid Pi Team instance config: ${configPath}`);
+	}
+	return parsed as TeamInstanceConfig;
+}
+
+async function request<T>(config: TeamInstanceConfig, path: string, body: unknown): Promise<T> {
+	const response = await fetch(`${config.serverUrl}${path}`, {
+		method: "POST",
+		headers: {
+			"authorization": `Bearer ${config.token}`,
+			"content-type": "application/json",
+			"x-pi-team-actor": config.agentId,
+			"x-pi-team-epoch": config.actorEpoch,
+		},
+		body: JSON.stringify(body),
+	});
+	const payload = (await response.json()) as { error?: string } & T;
+	if (!response.ok) throw new Error(payload.error || `Pi Team request failed: ${response.status}`);
+	return payload;
+}
+
+export function registerRoleExtension(pi: ExtensionAPI, expectedRole: TeamRole): void {
+	const config = readInstanceConfig(pi);
+	if (!config) throw new Error(`${expectedRole} extension requires --${TEAM_INSTANCE_FLAG} <config.json>`);
+	if (config.role !== expectedRole) throw new Error(`Expected role ${expectedRole}, got ${config.role}`);
+
+	pi.registerTool({
+		name: "team_send",
+		label: "Team Send",
+		description: "Send a directed message to another Pi Team role.",
+		parameters: Type.Object({
+			target: Type.String({ description: "Target agent ID" }),
+			message: Type.String({ description: "Message to deliver" }),
+		}),
+		async execute(_id, params) {
+			const result = await request<{ delivered: boolean }>(config, "/send", params);
+			return { content: [{ type: "text", text: `Message delivered to ${params.target}.` }], details: result };
+		},
+	});
+
+	if (expectedRole !== "worker") {
+		pi.registerTool({
+			name: "team_delegate",
+			label: "Team Delegate",
+			description:
+				expectedRole === "boss"
+					? "Create a Department Lead to own a workstream. A Boss may create up to four leads."
+					: "Create a Worker for a concrete task. A Department Lead may run up to four workers.",
+			parameters: Type.Object({
+				task: Type.String({ description: "Concrete delegated task" }),
+				name: Type.Optional(Type.String({ description: "Short display name" })),
+			}),
+			async execute(_id, params) {
+				const result = await request<{ agent: AgentRecord }>(config, "/delegate", params);
+				return {
+					content: [{ type: "text", text: `Created ${result.agent.role} ${result.agent.agentId}: ${result.agent.task}` }],
+					details: result,
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "team_cancel",
+			label: "Team Cancel",
+			description: "Cancel one of your subordinate agents and its descendants.",
+			parameters: Type.Object({ target: Type.String({ description: "Subordinate agent ID" }) }),
+			async execute(_id, params) {
+				const result = await request<{ cancelled: string[] }>(config, "/cancel", params);
+				return { content: [{ type: "text", text: `Cancelled: ${result.cancelled.join(", ")}` }], details: result };
+			},
+		});
+	}
+
+	pi.registerTool({
+		name: "team_read",
+		label: "Team Read",
+		description: expectedRole === "boss"
+			? "Read recent formal events for this Boss. Defaults to user and direct Lead reports; set drillDown to inspect Worker records."
+			: "Read recent formal group-chat events visible to this role.",
+		parameters: Type.Object({
+			limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 30 })),
+			drillDown: Type.Optional(Type.Boolean({ description: "Boss only: include Worker-level records" })),
+		}),
+		async execute(_id, params) {
+			const result = await request<{ events: TeamEvent[] }>(config, "/events", { limit: params.limit ?? 30, drillDown: params.drillDown === true });
+			const text = result.events
+				.map((event) => `#${event.seq} ${event.actorId} -> ${event.targetIds.join(",") || "group"}: ${event.content}`)
+				.join("\n");
+			return { content: [{ type: "text", text: text || "No visible team events." }], details: result };
+		},
+	});
+
+	pi.registerTool({
+		name: "team_list",
+		label: "Team List",
+		description: "List the Pi Team roles you are allowed to see.",
+		parameters: Type.Object({}),
+		async execute() {
+			const result = await request<{ agents: AgentRecord[] }>(config, "/list", {});
+			const text = result.agents.map((agent) => `${agent.agentId} [${agent.role}/${agent.status}] ${agent.task}`).join("\n");
+			return { content: [{ type: "text", text: text || "No team agents." }], details: result };
+		},
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		if (ctx.hasUI) ctx.ui.setStatus("pi-team-role", `${config.role}:${config.agentId}`);
+	});
+}

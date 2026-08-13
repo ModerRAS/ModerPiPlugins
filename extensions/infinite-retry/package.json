@@ -1,0 +1,16 @@
+{
+  "name": "moder-pi-infinite-retry",
+  "version": "0.1.0",
+  "description": "Provider stream retry support for Pi",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package"],
+  "files": ["index.ts", "README.md"],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}

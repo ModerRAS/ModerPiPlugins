@@ -1,25 +1,13 @@
 {
-  "name": "moder-pi-plugins",
+  "name": "moder-pi-plugins-workspace",
   "version": "0.1.0",
-  "description": "Personal pi plugin collection with an infinite provider retry extension.",
+  "description": "Source workspace for independently installable Moder Pi plugins",
+  "private": true,
   "type": "module",
   "license": "MIT",
-  "keywords": [
-    "pi-package"
-  ],
-  "files": [
-    "extensions",
-    "README.md",
-    "LICENSE",
-    "AGENTS.md"
-  ],
-  "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
-  },
-  "pi": {
-    "extensions": [
-      "./extensions/*.ts"
-    ]
-  }
+  "workspaces": [
+    "extensions/goal",
+    "extensions/infinite-retry",
+    "extensions/pi-team"
+  ]
 }
