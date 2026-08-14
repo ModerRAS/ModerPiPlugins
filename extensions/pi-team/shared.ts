@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+export { formatProgress, readJsonFile, readJsonLines, sendRpcPrompt, writeJsonAtomic, type RpcPromptRequester } from "./runtime.ts";
 
 export type TeamRole = "boss" | "lead" | "worker";
 export type AgentStatus = "starting" | "running" | "idle" | "recovering" | "cancelled" | "failed";

@@ -1,21 +1,26 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { appendFileSync, copyFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { randomBytes, randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Box, Text, type TUI } from "@earendil-works/pi-tui";
+import { CONFIG_DIR_NAME, SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Box, Text, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { createProcessJob, type ProcessJob } from "./windows-job.ts";
 import {
 	MAX_CHILDREN,
 	TEAM_EVENT_ENTRY,
 	TEAM_INSTANCE_FLAG,
 	TEAM_STATE_ENTRY,
+	formatProgress,
 	getMessageText,
 	readInstanceConfig,
+	readJsonFile,
+	readJsonLines,
 	registerRoleExtension,
+	sendRpcPrompt,
+	writeJsonAtomic,
 	type AgentRecord,
 	type AgentStatus,
 	type TeamEvent,
@@ -163,18 +168,21 @@ class RpcClient {
 	}
 }
 
-class TeamActivityPanel {
+export class TeamActivityPanel {
 	constructor(
 		private tui: TUI,
 		private getAgents: () => RuntimeAgent[],
-		private getEvents: () => TeamEvent[],
 		private getFocusedBoss: () => string | undefined,
 		private getInspectedAgent: () => RuntimeAgent | undefined,
-		private isMainEvent: (event: TeamEvent) => boolean,
 	) {}
 
 	render(width: number): string[] {
-		const inner = Math.max(10, width - 2);
+		if (width < 2) return [" ".repeat(Math.max(0, width))];
+		const inner = width - 2;
+		const frameLine = (line: string): string => {
+			const clipped = truncateToWidth(line, inner, "…");
+			return `│${clipped}${" ".repeat(Math.max(0, inner - visibleWidth(clipped)))}│`;
+		};
 		const allAgents = this.getAgents();
 		const byId = new Map(allAgents.map((agent) => [agent.agentId, agent]));
 		const pathOf = (agentId: string): string => {
@@ -191,28 +199,23 @@ class TeamActivityPanel {
 			const lines = [
 				`INSPECT ${pathOf(inspected.agentId)}`,
 				`[${inspected.role}/${inspected.status}]`,
-				`Task: ${inspected.task}`,
 				"",
 				...inspected.details.slice(-30),
 			];
 			return [
 				`┌${"─".repeat(inner)}┐`,
-				...lines.map((line) => `│${truncate(line, inner).padEnd(inner)}│`),
+				...lines.map(frameLine),
 				`└${"─".repeat(inner)}┘`,
 			];
 		}
-		const agents = allAgents.slice(0, 12).map((agent) => {
+		const agentLines = allAgents.slice(0, 12).map((agent) => {
 			const focus = agent.agentId === this.getFocusedBoss() ? ">" : " ";
-			return `${focus} ${pathOf(agent.agentId)} [${agent.status} r${agent.runCount ?? 0}]`;
+			return `${focus} ${pathOf(agent.agentId)} [${agent.role}/${agent.status} r${agent.runCount ?? 0}]`;
 		});
-		const activity = this.getEvents()
-			.filter((event) => !this.isMainEvent(event))
-			.slice(-12)
-			.map((event) => `${pathOf(event.actorId)}: ${event.content}`);
-		const lines = ["PI TEAM", ...agents, "", "ACTIVITY", ...activity];
+		const lines = ["PI TEAM", ...(agentLines.length ? agentLines : ["No active agents"])];
 		return [
 			`┌${"─".repeat(inner)}┐`,
-			...lines.map((line) => `│${truncate(line, inner).padEnd(inner)}│`),
+			...lines.map(frameLine),
 			`└${"─".repeat(inner)}┘`,
 		];
 	}
@@ -245,11 +248,13 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	let startupPromise: Promise<void> | undefined;
 	let processJob: ProcessJob | undefined;
 	let serverUrl = "";
+	let stateRoot = "";
 	let stateDir = "";
+	let statePath = "";
 	let eventsPath = "";
+	let teamSessionMirror: SessionManager | undefined;
 	let inspectedAgentId: string | undefined;
 	let activityPanel: TeamActivityPanel | undefined;
-	let closeActivityPanel: (() => void) | undefined;
 	const agents = new Map<string, RuntimeAgent>();
 	const events: TeamEvent[] = [];
 	const parentNotifications = new Map<string, { messages: string[]; timer?: ReturnType<typeof setTimeout> }>();
@@ -265,8 +270,14 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		return parts.length ? parts.join("/") : agentId;
 	}
 
-	function resolveAgent(reference: string): RuntimeAgent | undefined {
-		return agents.get(reference) ?? [...agents.values()].find((agent) => agentPath(agent.agentId) === reference);
+	function resolveAgent(reference: string, rejectAmbiguousName = false): RuntimeAgent | undefined {
+		const normalized = reference.trim().replace(/^@/, "");
+		const addressed = agents.get(normalized) ?? [...agents.values()].find((agent) => agentPath(agent.agentId) === normalized);
+		if (addressed) return addressed;
+		const named = [...agents.values()].filter((agent) => agent.name === normalized);
+		if (named.length === 1) return named[0];
+		if (named.length > 1 && rejectAmbiguousName) throw new Error(`Ambiguous target name: ${normalized}; use an agent ID or full path`);
+		return undefined;
 	}
 
 	function publicAgent(agent: RuntimeAgent): AgentRecord {
@@ -278,8 +289,49 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		return { version: 1, teamId, focusedBossId, agents: [...agents.values()].map(publicAgent) };
 	}
 
+	function teamSessionName(): string {
+		const boss = [...agents.values()].find((agent) => agent.role === "boss");
+		return boss ? `Pi Team: ${truncate(boss.task, 60)}` : "Pi Team";
+	}
+
+	function mainSessionPersists(): boolean {
+		return Boolean(context?.sessionManager.getSessionFile());
+	}
+
+	function ensureTeamSessionMirror(): SessionManager | undefined {
+		if (!context || mainSessionPersists()) return undefined;
+		if (!teamSessionMirror) {
+			teamSessionMirror = SessionManager.create(context.cwd);
+			teamSessionMirror.appendSessionInfo(teamSessionName());
+			teamSessionMirror.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "Pi Team supervisor session. Resume this session to restore the team, focused Boss, and formal group chat." }],
+				api: "openai-responses",
+				provider: "pi-team",
+				model: "supervisor",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			const persistedEvents = eventsPath ? readJsonLines<TeamEvent>(eventsPath) : events;
+			for (const event of persistedEvents) teamSessionMirror.appendCustomEntry(TEAM_EVENT_ENTRY, event);
+		}
+		return teamSessionMirror;
+	}
+
 	function persistState(): void {
-		pi.appendEntry<PersistedState>(TEAM_STATE_ENTRY, snapshot());
+		const state = snapshot();
+		pi.appendEntry<PersistedState>(TEAM_STATE_ENTRY, state);
+		ensureTeamSessionMirror()?.appendCustomEntry(TEAM_STATE_ENTRY, state);
+		if (statePath) writeJsonAtomic(statePath, state);
+		if (stateRoot && stateDir) writeJsonAtomic(join(stateRoot, "latest.json"), { storageId: basename(stateDir), updatedAt: now(), version: 1 });
 	}
 
 	function appendEvent(input: Omit<TeamEvent, "eventId" | "seq" | "timestamp">): TeamEvent {
@@ -288,6 +340,9 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		if (events.length > 1000) events.splice(0, events.length - 1000);
 		if (eventsPath) appendFileSync(eventsPath, `${JSON.stringify(event)}\n`, "utf8");
 		pi.appendEntry<TeamEvent>(TEAM_EVENT_ENTRY, event);
+		const existingMirror = teamSessionMirror;
+		const mirror = ensureTeamSessionMirror();
+		if (mirror && existingMirror) mirror.appendCustomEntry(TEAM_EVENT_ENTRY, event);
 		return event;
 	}
 
@@ -299,46 +354,86 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		if (!context?.hasUI) return;
 		const list = [...agents.values()];
 		context.ui.setStatus(TEAM_STATUS_KEY, `team ${list.filter((a) => a.status === "running").length}/${list.length}`);
+		if (context.mode === "tui") {
+			if (!activityPanel) {
+				context.ui.setWidget(TEAM_WIDGET_KEY, (tui) => {
+					activityPanel = new TeamActivityPanel(
+						tui,
+						() => [...agents.values()],
+						() => focusedBossId,
+						() => inspectedAgentId ? agents.get(inspectedAgentId) : undefined,
+					);
+					return activityPanel;
+				}, { placement: "belowEditor" });
+			} else {
+				activityPanel.requestRender();
+			}
+			return;
+		}
 		const lines = list.slice(0, 12).map((agent) => {
 			const focus = agent.agentId === focusedBossId ? ">" : " ";
 			return `${focus} ${agentPath(agent.agentId)} [${agent.role}/${agent.status} r${agent.runCount ?? 0}] ${truncate(agent.task, 55)}`;
 		});
 		context.ui.setWidget(TEAM_WIDGET_KEY, lines.length ? lines : ["Pi Team: /boss <task> to start"], { placement: "belowEditor" });
-		activityPanel?.requestRender();
 	}
 
-	function openActivityPanel(ctx: ExtensionContext): void {
-		if (ctx.mode !== "tui" || closeActivityPanel) return;
-		void ctx.ui.custom<void>((tui, _theme, _kb, done) => {
-			closeActivityPanel = () => done();
-			activityPanel = new TeamActivityPanel(
-				tui,
-				() => [...agents.values()],
-				() => events,
-				() => focusedBossId,
-				() => inspectedAgentId ? agents.get(inspectedAgentId) : undefined,
-				isMainTranscriptEvent,
-			);
-			return activityPanel;
-		}, {
-			overlay: true,
-			overlayOptions: {
-				anchor: "right-center",
-				width: "32%",
-				minWidth: 36,
-				maxHeight: "90%",
-				margin: { right: 1 },
-				nonCapturing: true,
-				visible: (terminalWidth) => terminalWidth >= 100,
-			},
-		}).finally(() => {
-			activityPanel = undefined;
-			closeActivityPanel = undefined;
-		});
+	function readStandaloneState(directory: string): PersistedState | undefined {
+		const stored = readJsonFile<PersistedState>(join(directory, "state.json"));
+		if (stored?.version === 1 && Array.isArray(stored.agents)) return stored;
+
+		const agentsDirectory = join(directory, "agents");
+		if (!existsSync(agentsDirectory)) return undefined;
+		const storedEvents = readJsonLines<TeamEvent>(join(directory, "events.jsonl"));
+		const cancelled = new Set(storedEvents.filter((event) => event.kind === "control" && event.content.startsWith("Cancelled ")).flatMap((event) => event.targetIds));
+		const records: AgentRecord[] = [];
+		let legacyTeamId: string | undefined;
+		for (const entry of readdirSync(agentsDirectory, { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue;
+			const config = readJsonFile<TeamInstanceConfig>(join(agentsDirectory, entry.name, "instance.json"));
+			if (!config?.agentId || !config.task || !(["boss", "lead", "worker"] as const).includes(config.role)) continue;
+			legacyTeamId ??= config.teamId;
+			const sessionsDirectory = join(agentsDirectory, entry.name, "sessions");
+			const sessionPath = existsSync(sessionsDirectory)
+				? readdirSync(sessionsDirectory)
+					.filter((name) => name.endsWith(".jsonl"))
+					.map((name) => join(sessionsDirectory, name))
+					.sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs)[0]
+				: undefined;
+			records.push({
+				actorEpoch: config.actorEpoch,
+				agentId: config.agentId,
+				departmentId: config.departmentId,
+				name: config.agentId,
+				parentId: config.parentId,
+				role: config.role,
+				runCount: 0,
+				sessionPath,
+				status: cancelled.has(config.agentId) ? "cancelled" : "recovering",
+				task: config.task,
+			});
+		}
+		if (!legacyTeamId || !records.length) return undefined;
+		return { version: 1, teamId: legacyTeamId, focusedBossId: records.find((agent) => agent.role === "boss")?.agentId, agents: records };
+	}
+
+	function findStandaloneState(root: string): { directory: string; state: PersistedState } | undefined {
+		const pointer = readJsonFile<{ storageId?: string }>(join(root, "latest.json"));
+		const pointedDirectory = pointer?.storageId && basename(pointer.storageId) === pointer.storageId ? join(root, pointer.storageId) : undefined;
+		const directories = readdirSync(root, { withFileTypes: true })
+			.filter((entry) => entry.isDirectory())
+			.map((entry) => join(root, entry.name))
+			.sort((left, right) => statSync(right).mtimeMs - statSync(left).mtimeMs);
+		const candidates = pointedDirectory ? [pointedDirectory, ...directories.filter((directory) => directory !== pointedDirectory)] : directories;
+		for (const directory of candidates) {
+			const state = readStandaloneState(directory);
+			if (state) return { directory, state };
+		}
+		return undefined;
 	}
 
 	function reconstruct(ctx: ExtensionContext, reason: string): void {
 		context = ctx;
+		teamSessionMirror = undefined;
 		for (const batch of parentNotifications.values()) if (batch.timer) clearTimeout(batch.timer);
 		parentNotifications.clear();
 		agents.clear();
@@ -349,11 +444,32 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			const stateEntry = entry as TeamStateEntry;
 			if (stateEntry.type === "custom" && stateEntry.customType === TEAM_STATE_ENTRY && stateEntry.data) saved = stateEntry.data;
 			const eventEntry = entry as TeamEventEntry;
-			if (eventEntry.type === "custom" && eventEntry.customType === TEAM_EVENT_ENTRY && eventEntry.data) {
-				events.push(eventEntry.data);
-				seq = Math.max(seq, eventEntry.data.seq);
+			if (eventEntry.type === "custom" && eventEntry.customType === TEAM_EVENT_ENTRY && eventEntry.data) events.push(eventEntry.data);
+		}
+
+		stateRoot = join(ctx.cwd, CONFIG_DIR_NAME, "pi-team");
+		mkdirSync(stateRoot, { recursive: true });
+		stateDir = join(stateRoot, ctx.sessionManager.getSessionId());
+		if (!saved && !mainSessionPersists() && reason !== "new" && reason !== "fork") {
+			const standalone = findStandaloneState(stateRoot);
+			if (standalone) {
+				saved = standalone.state;
+				stateDir = standalone.directory;
 			}
 		}
+		mkdirSync(stateDir, { recursive: true });
+		statePath = join(stateDir, "state.json");
+		eventsPath = join(stateDir, "events.jsonl");
+		const mergedEvents = new Map<string, TeamEvent>();
+		for (const event of [...readJsonLines<TeamEvent>(eventsPath), ...events]) {
+			if (!event?.eventId || !Number.isFinite(event.seq)) continue;
+			mergedEvents.set(event.eventId, event);
+		}
+		events.length = 0;
+		events.push(...[...mergedEvents.values()].sort((left, right) => left.seq - right.seq).slice(-1000));
+		seq = events.reduce((maximum, event) => Math.max(maximum, event.seq), 0);
+		if (!existsSync(eventsPath) && events.length) writeFileSync(eventsPath, `${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+
 		if (saved && reason !== "new") {
 			teamId = reason === "fork" ? randomUUID() : saved.teamId;
 			focusedBossId = saved.focusedBossId;
@@ -373,13 +489,12 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 					token: randomBytes(24).toString("hex"),
 				});
 			}
+			pi.setSessionName(teamSessionName());
+			persistState();
 		} else {
 			teamId = randomUUID();
 			focusedBossId = undefined;
 		}
-		stateDir = join(ctx.cwd, ".pi", "pi-team", ctx.sessionManager.getSessionId());
-		mkdirSync(stateDir, { recursive: true });
-		eventsPath = join(stateDir, "events.jsonl");
 		updateUi();
 	}
 
@@ -412,7 +527,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		return agent.parentId ? agents.get(agent.parentId) : undefined;
 	}
 
-	async function deliver(agent: RuntimeAgent, message: string, behavior: "steer" | "followUp" = "steer"): Promise<void> {
+	async function deliver(agent: RuntimeAgent, message: string): Promise<void> {
 		if (!agent.rpc) throw new Error(`${agent.agentId} is not connected`);
 		const pendingBatch = parentNotifications.get(agent.agentId);
 		if (pendingBatch) {
@@ -426,8 +541,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			.map((event) => `#${event.seq} ${agentPath(event.actorId)} [${event.kind}]: ${event.content}`)
 			.join("\n");
 		const enriched = unseen ? `Formal Team events since your previous wake:\n${unseen}\n\nIncoming wake signal:\n${message}` : message;
-		const type = agent.status === "running" ? behavior === "steer" ? "steer" : "follow_up" : "prompt";
-		await agent.rpc.request({ type, message: enriched });
+		await sendRpcPrompt(agent.rpc, enriched);
 		agent.lastContextSeq = Math.max(agent.lastContextSeq ?? 0, throughSeq);
 		persistState();
 	}
@@ -443,7 +557,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		agent.progressTimer = setTimeout(() => {
 			agent.progressTimer = undefined;
 			if (agent.status !== "running") return;
-			const progress = agent.pendingParentMessages.join("\n\n");
+			const progress = formatProgress(agent.pendingParentMessages);
 			agent.pendingParentMessages.length = 0;
 			appendEvent({
 				actorId: "supervisor",
@@ -452,7 +566,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 				kind: "status",
 				targetIds: agent.parentId ? [agent.parentId] : [],
 			});
-			void notifyParent(agent, `[${agentPath(agent.agentId)} worker 10-minute inspection}]\n${progress.length ? progress.join("\n\n") : "Still running; no new assistant text in this interval."}`);
+			void notifyParent(agent, `[${agentPath(agent.agentId)} worker 10-minute inspection}]\n${progress || "Still running; no new assistant text in this interval."}`);
 			scheduleWorkerInspection(agent);
 		}, 10 * 60_000);
 	}
@@ -473,7 +587,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			parentNotifications.delete(parent.agentId);
 			if (parent.status === "cancelled") return;
 			const combined = current.messages.join("\n\n---\n\n");
-			deliver(parent, combined, "steer").catch((error) => {
+			deliver(parent, combined).catch((error) => {
 				addDetail(parent, `delivery failed: ${error instanceof Error ? error.message : String(error)}`);
 			});
 		}, 1_500);
@@ -494,7 +608,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 				agent.progressTimer = undefined;
 				addDetail(agent, "agent settled");
 				persistState();
-				const report = agent.pendingParentMessages.join("\n\n");
+				const report = formatProgress(agent.pendingParentMessages);
 				agent.pendingParentMessages.length = 0;
 				appendEvent({
 					actorId: "supervisor",
@@ -506,16 +620,11 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 				void notifyParent(agent, `[${agentPath(agent.agentId)} ${agent.role} settled/idle}]${report ? `\n${report}` : "\nNo new assistant text since the previous inspection."}`);
 				break;
 			}
-			case "message_update": {
-				const delta = event.assistantMessageEvent;
-				if (delta?.type === "text_delta") addDetail(agent, delta.delta);
-				break;
-			}
 			case "message_end":
 				if (event.message?.role === "assistant") void publishAssistantText(agent, getMessageText(event.message));
 				break;
 			case "tool_execution_start":
-				addDetail(agent, `tool ${event.toolName} ${JSON.stringify(event.args)}`);
+				addDetail(agent, `tool ${event.toolName} started`);
 				break;
 			case "tool_execution_update":
 				addDetail(agent, `tool ${event.toolName} updating`);
@@ -527,7 +636,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 				addDetail(agent, `queue steer=${event.steering?.length ?? 0} follow=${event.followUp?.length ?? 0}`);
 				break;
 			case "extension_ui_request":
-				addDetail(agent, `UI request ${event.method}: ${event.title || event.message || ""}`);
+				addDetail(agent, `UI request ${event.method}`);
 				if (["select", "input", "editor", "confirm"].includes(event.method)) {
 					agent.process?.stdin.write(`${JSON.stringify({ type: "extension_ui_response", id: event.id, cancelled: true })}\n`);
 				}
@@ -665,6 +774,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			status: "starting", task: task.trim(), token: randomBytes(24).toString("hex"),
 		};
 		agents.set(agentId, agent);
+		if (role === "boss" && agents.size === 1) pi.setSessionName(teamSessionName());
 		persistState();
 		try {
 			await startAgent(agent);
@@ -725,7 +835,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	}
 
 	function canMessage(actor: RuntimeAgent, target: RuntimeAgent): boolean {
-		return actor.parentId === target.agentId || target.parentId === actor.agentId;
+		return actor.agentId !== target.agentId;
 	}
 
 	function authorized(req: IncomingMessage): RuntimeAgent | undefined {
@@ -772,9 +882,9 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 				return json(res, 200, { agent: publicAgent(agent) });
 			}
 			if (req.url === "/send") {
-				const target = resolveAgent(String(data.target || ""));
+				const target = resolveAgent(String(data.target || ""), true);
 				if (!target) throw new Error("Unknown target");
-				if (!canMessage(actor, target)) throw new Error(`${actor.agentId} may only message its direct parent or children`);
+				if (!canMessage(actor, target)) throw new Error(`${actor.agentId} may only message another role in the same Pi Team`);
 				const message = String(data.message || "").trim();
 				if (!message) throw new Error("Message is required");
 				appendEvent({ actorId: actor.agentId, content: message, departmentId: actor.departmentId, kind: "message", targetIds: [target.agentId] });
@@ -811,7 +921,8 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("team", { description: "Show Pi Team status", handler: async (_args, ctx) => {
-		ctx.ui.notify(`${agents.size} agents; focused Boss: ${focusedBossId || "none"}; IPC: ${serverUrl || "starting"}`, "info");
+		const sessionFile = context?.sessionManager.getSessionFile() ?? teamSessionMirror?.getSessionFile();
+		ctx.ui.notify(`${agents.size} agents; focused Boss: ${focusedBossId || "none"}; session: ${sessionFile || "not created"}; IPC: ${serverUrl || "starting"}`, "info");
 	}});
 	pi.registerCommand("boss", { description: "Create and focus a new Boss", handler: async (args, ctx) => {
 		const task = args.trim();
@@ -848,7 +959,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		const lines = events.slice(-limit).map((event) => `#${event.seq} ${agentPath(event.actorId)} -> ${event.targetIds.map(agentPath).join(",") || "group"}: ${event.content}`);
 		ctx.ui.notify(lines.join("\n") || "No team events.", "info");
 	}});
-	pi.registerCommand("inspect", { description: "Show one agent's RPC activity in the passive side panel", handler: async (args, ctx) => {
+	pi.registerCommand("inspect", { description: "Show one agent's RPC activity in the bottom team panel", handler: async (args, ctx) => {
 		const target = args.trim();
 		if (target === "off") {
 			inspectedAgentId = undefined;
@@ -880,7 +991,6 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		shuttingDown = false;
 		await startupPromise;
 		reconstruct(ctx, event.reason);
-		openActivityPanel(ctx);
 		for (const agent of agents.values()) {
 			if (agent.status === "cancelled") continue;
 			void startAgent(agent, true).catch((error) => addDetail(agent, `resume failed: ${error instanceof Error ? error.message : String(error)}`));
@@ -906,8 +1016,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		await startupPromise?.catch(() => undefined);
 		for (const batch of parentNotifications.values()) if (batch.timer) clearTimeout(batch.timer);
 		parentNotifications.clear();
-		closeActivityPanel?.();
-		closeActivityPanel = undefined;
+		context?.ui.setWidget(TEAM_WIDGET_KEY, undefined);
 		activityPanel = undefined;
 		server?.close();
 		for (const agent of agents.values()) await stopProcess(agent);

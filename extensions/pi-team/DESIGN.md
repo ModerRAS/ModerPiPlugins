@@ -79,7 +79,7 @@ Worker `agent_settled` 必定产生直属主管通知。主管正在运行时用
 
 ## 线性上下文上的并发 Boss
 
-共享正式上下文是一条线性、只追加的事件日志。多个 Boss 是这条日志不同前缀上的并发分叉，而不是互不相关的新聊天。
+共享正式上下文是一条线性、只追加的事件日志。每条事件同时进入可由 `/resume` 发现的 Supervisor 主 Session，并逐条写入项目内的 `events.jsonl`；Team 快照另以原子 `state.json` 保存。多个 Boss 是这条日志不同前缀上的并发分叉，而不是互不相关的新聊天。
 
 ```text
 E1 用户要求
@@ -174,7 +174,7 @@ Department Lead
 
 Worker
   - 执行自己的任务
-  - 向主管提问或发布阶段结果
+  - 向同一 Team 的任意角色提问或发布阶段结果
   - 不得创建其他 Agent
 ```
 
@@ -230,7 +230,7 @@ UI 把所有正常聊天和执行细节分流：
 +-----------------------------------------------------------+
 ```
 
-用户始终在主 transcript 看到 Boss、主管和 Worker 的正常文本。右侧被动面板只显示角色状态、派工/控制/错误摘要；选择角色后显示工具和 RPC Inspector。这样不会把正式聊天藏进侧栏，也不会让工具噪声冲散主聊天。
+用户始终在主 transcript 看到 Boss、主管和 Worker 的正常文本。底部被动面板只显示角色运行状态；选择角色后显示不含 prompt、回复正文和完整参数的工具生命周期与 RPC 状态。这样不会把正式聊天藏进状态框，也不会让长文本拖累 TUI 渲染。
 
 ### 主 transcript
 
@@ -240,9 +240,8 @@ UI 把所有正常聊天和执行细节分流：
 
 Inspector 是不抢占主编辑器焦点的只读观察器。用户可选择任意 Boss、主管或 Worker，并查看：
 
-- 角色与任务状态。
-- 该 RPC Pi 的完整可见会话回复。
-- 工具调用与有限实时输出。
+- 角色运行状态。
+- 工具调用生命周期。
 - 命令、测试、diff、文件变化和错误。
 - 队列、未读消息和取消状态。
 
@@ -276,7 +275,7 @@ maxAgentDepth: 3
 /view ...
 ```
 
-首版建议只支持严格命令地址，不解析任意自由文本中的 `@mention`。后续可以增加行首 `@agent-id`，但代码块、邮箱和普通文本中的 `@` 不应触发路由。
+首版的自由文本正文不自动解析任意 `@mention`，避免代码块、邮箱和普通文本误触发路由。角色通过 `team_send` 的结构化 target 寻址：支持稳定 agent id、完整层级路径、这些形式前加 `@`，以及唯一显示名；歧义显示名必须改用 id 或完整路径。普通消息可在同一 Supervisor 所属 Team registry 的任意两个不同成员之间投递。
 
 建议的内部工具：
 
@@ -341,11 +340,11 @@ Supervisor 使用 Windows Job Object 管理全部 Boss、主管、Worker 及其�
 
 ### 9. IPC 身份与权限
 
-Team 插件自行完成 loopback IPC 的随机实例凭据、actor/epoch 校验、消息大小限制和 fail-closed 行为。这是实现职责，不是用户侧未决需求。
+Team 插件自行完成 loopback IPC 的随机实例凭据、actor/epoch 校验、消息大小限制和 fail-closed 行为。每个 Supervisor 只持有一个 Team 的 agent registry；普通消息目标必须在该 registry 中唯一解析，跨 Team actor 也无法通过本 server 的 token/epoch 认证。消息权限不会改变委派、取消、状态控制或角色上下文投影。这是实现职责，不是用户侧未决需求。
 
 ### 10. 遵循 Pi 原生会话导航语义
 
-团队状态随主 Pi 会话一起遵循原生行为：`/reload` 重新加载 Supervisor 和所有角色的 Team 插件逻辑；`/resume` 恢复对应团队结构与各自 Session；`/fork` 复制当前会话对应的团队状态；`/new` 创建一套新的空团队状态。实现应让这些操作对用户表现得像 Pi 原生命令，而不是另设一套生命周期。具体复制和重连细节由插件处理。
+团队状态随主 Pi 会话一起遵循原生行为：Team 使用带 `Pi Team: ...` 名称的 Supervisor 主 Session，因此可由 `/resume` 发现；恢复后重建正式群聊、组织结构、上次 focused Boss 和各角色 Session。若宿主使用 `--no-session`，插件创建只承载 Team 快照与正式事件的原生 Session 锚点，避免 Team 成为不可恢复的内存状态。`/reload` 重新加载 Supervisor 和所有角色的 Team 插件逻辑；`/resume` 恢复 Team；`/fork` 复制 Team 前缀；`/new` 创建空 Team。独立 `state.json` 与 `events.jsonl` 在主 Session 缺失或旧版崩溃遗留时提供恢复兜底。
 
 ### 11. Inspector 使用非抢焦点 overlay
 

@@ -73,6 +73,16 @@ async function postAs(config, path, body) {
 	return payload;
 }
 
+async function expectRejected(action, fragment) {
+	try {
+		await action();
+	} catch (error) {
+		if (String(error).includes(fragment)) return;
+		throw error;
+	}
+	throw new Error(`Expected rejection containing: ${fragment}`);
+}
+
 async function waitForEntry(predicate, timeoutMs = 180_000) {
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
@@ -110,6 +120,37 @@ try {
 	const leadConfig = JSON.parse(readFileSync(resolve(teamAgentDir, `${lead.agentId}/instance.json`), "utf8"));
 	const workers = await Promise.all(Array.from({ length: 4 }, (_, index) => postAs(leadConfig, "/delegate", { task: `Capacity smoke worker ${index + 1}; wait for direction.`, reason: `Verify concurrent Worker slot ${index + 1} remains available for complex tasks.` })));
 	if (new Set(workers.map((result) => result.agent.agentId)).size !== 4) throw new Error("Worker IDs were not unique");
+	const workerConfigs = workers.map((result) => JSON.parse(readFileSync(resolve(teamAgentDir, `${result.agent.agentId}/instance.json`), "utf8")));
+	const crossLead = (await postAs(bossConfig, "/delegate", { task: "Cross-branch messaging smoke lead; wait for direction.", reason: "Create a second department to verify same-Team cross-branch messaging.", name: "Capacity Lead" })).agent;
+	const crossLeadConfig = JSON.parse(readFileSync(resolve(teamAgentDir, `${crossLead.agentId}/instance.json`), "utf8"));
+	const crossWorker = (await postAs(crossLeadConfig, "/delegate", { task: "Cross-branch messaging smoke worker; wait for direction.", reason: "Provide a Worker under a different Lead for messaging verification.", name: "Cross Branch Worker" })).agent;
+	const crossWorkerConfig = JSON.parse(readFileSync(resolve(teamAgentDir, `${crossWorker.agentId}/instance.json`), "utf8"));
+
+	const messages = {
+		parentChild: "TEAM_MSG_PARENT_CHILD",
+		siblingWorker: "TEAM_MSG_SIBLING_WORKER",
+		crossWorker: "TEAM_MSG_CROSS_WORKER",
+		siblingLead: "TEAM_MSG_SIBLING_LEAD",
+		nonDirectLeadWorker: "TEAM_MSG_NONDIRECT_LEAD_WORKER",
+		reverseLeadWorker: "TEAM_MSG_REVERSE_LEAD_WORKER",
+	};
+	await postAs(leadConfig, "/send", { target: `@${workers[0].agent.agentId}`, message: messages.parentChild });
+	await postAs(workerConfigs[0], "/send", { target: `@${workers[1].agent.path}`, message: messages.siblingWorker });
+	await postAs(workerConfigs[0], "/send", { target: "@Cross Branch Worker", message: messages.crossWorker });
+	await postAs(leadConfig, "/send", { target: crossLead.path, message: messages.siblingLead });
+	await postAs(leadConfig, "/send", { target: crossWorker.agentId, message: messages.nonDirectLeadWorker });
+	await postAs(crossWorkerConfig, "/send", { target: lead.agentId, message: messages.reverseLeadWorker });
+	await expectRejected(() => postAs(workerConfigs[0], "/send", { target: workers[0].agent.agentId, message: "self must fail" }), "may only message another role in the same Pi Team");
+	await expectRejected(() => postAs(workerConfigs[0], "/send", { target: "@missing-worker", message: "unknown must fail" }), "Unknown target");
+	await expectRejected(() => postAs(workerConfigs[0], "/send", { target: "@Capacity Lead", message: "ambiguous must fail" }), "Ambiguous target name");
+	await expectRejected(() => postAs({ ...workerConfigs[0], actorEpoch: "foreign-team-epoch", token: "foreign-team-token" }, "/send", { target: crossWorker.agentId, message: "cross-team must fail" }), "Unauthorized");
+	await expectRejected(() => postAs(workerConfigs[0], "/delegate", { task: "must fail", reason: "Workers still cannot delegate team roles." }), "Workers cannot delegate");
+	await expectRejected(() => postAs(leadConfig, "/cancel", { target: crossWorker.agentId }), "may only cancel direct subordinates");
+
+	const messagingEntries = await waitForEntry((items) => Object.values(messages).every((message) => items.some((entry) => entry.customType === "pi-team-event" && entry.data?.kind === "message" && entry.data?.content === message)));
+	const crossMessage = messagingEntries.find((entry) => entry.customType === "pi-team-event" && entry.data?.content === messages.crossWorker);
+	if (crossMessage?.data?.actorId !== workers[0].agent.agentId || crossMessage.data.targetIds?.[0] !== crossWorker.agentId) throw new Error("Cross-worker group-chat event lost authenticated actor or target identity");
+
 	let fifthRejected = false;
 	try { await postAs(leadConfig, "/delegate", { task: "This fifth worker must be rejected.", reason: "Verify the hard safety ceiling still rejects a fifth concurrent Worker." }); }
 	catch (error) { fifthRejected = String(error).includes("already has 4 active children"); }
@@ -122,7 +163,7 @@ try {
 	if (!entries.some((entry) => entry.customType === "pi-team-state" && entry.data?.focusedBossId === "boss-1")) throw new Error("Focused Boss was not persisted");
 	if (events.some((event) => event.type === "non-json")) throw new Error("RPC stdout contained non-JSON output");
 	if (stderr.trim()) throw new Error(`Supervisor stderr was not empty: ${stderr.trim()}`);
-	console.log(`PASS boss replies=2 recoveryPid=${firstBossPid}->new hierarchy=1+1+4 capacityLimit=ok entries=${finalEntries.length} rpcEvents=${events.length}`);
+	console.log(`PASS boss replies=2 recoveryPid=${firstBossPid}->new hierarchy=1+2+5 capacityLimit=ok messaging=parent+sibling+cross-branch visibility=ok isolation=ok entries=${finalEntries.length} rpcEvents=${events.length}`);
 } finally {
 	for (const item of pending.values()) {
 		clearTimeout(item.timer);
