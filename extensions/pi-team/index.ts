@@ -18,11 +18,14 @@ import {
 	readInstanceConfig,
 	readJsonFile,
 	readJsonLines,
+	readModelPool,
 	registerRoleExtension,
+	resolveModelPattern,
 	sendRpcPrompt,
 	writeJsonAtomic,
 	type AgentRecord,
 	type AgentStatus,
+	type ModelPool,
 	type TeamEvent,
 	type TeamInstanceConfig,
 	type TeamRole,
@@ -253,6 +256,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	let statePath = "";
 	let eventsPath = "";
 	let teamSessionMirror: SessionManager | undefined;
+	let modelPool: ModelPool = {};
 	let inspectedAgentId: string | undefined;
 	let activityPanel: TeamActivityPanel | undefined;
 	const agents = new Map<string, RuntimeAgent>();
@@ -408,6 +412,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 				role: config.role,
 				runCount: 0,
 				sessionPath,
+				identity: config.identity,
 				status: cancelled.has(config.agentId) ? "cancelled" : "recovering",
 				task: config.task,
 			});
@@ -449,6 +454,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 
 		stateRoot = join(ctx.cwd, CONFIG_DIR_NAME, "pi-team");
 		mkdirSync(stateRoot, { recursive: true });
+		modelPool = { ...readModelPool(join(stateRoot, "models.json")), ...readModelPool(join(stateRoot, "identities.json")) };
 		stateDir = join(stateRoot, ctx.sessionManager.getSessionId());
 		if (!saved && !mainSessionPersists() && reason !== "new" && reason !== "fork") {
 			const standalone = findStandaloneState(stateRoot);
@@ -668,6 +674,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			actorEpoch: agent.actorEpoch,
 			agentId: agent.agentId,
 			departmentId: agent.departmentId,
+			identity: agent.identity,
 			parentId: agent.parentId,
 			role: agent.role,
 			serverUrl,
@@ -688,6 +695,8 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		} else {
 			args.push("--session-dir", sessionDir);
 		}
+		const modelPattern = resolveModelPattern(modelPool, agent.identity);
+		if (modelPattern) args.push("--model", modelPattern);
 		const invocation = getPiInvocation(args);
 		const child = spawn(invocation.command, invocation.args, { cwd: context!.cwd, shell: false, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 		agent.process = child;
@@ -758,18 +767,20 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		return [...agents.values()].filter((agent) => agent.parentId === parentId && agent.status !== "cancelled").length;
 	}
 
-	async function createAgent(role: TeamRole, task: string, parentId?: string, name?: string): Promise<RuntimeAgent> {
+	async function createAgent(role: TeamRole, task: string, parentId?: string, name?: string, identity?: string): Promise<RuntimeAgent> {
 		await startupPromise;
 		if (role === "boss" && [...agents.values()].filter((a) => a.role === "boss" && a.status !== "cancelled").length >= MAX_BOSSES) throw new Error(`Maximum Boss count is ${MAX_BOSSES}`);
 		if (parentId && childCount(parentId) >= MAX_CHILDREN) throw new Error(`${parentId} already has ${MAX_CHILDREN} active children`);
 		const parent = parentId ? agents.get(parentId) : undefined;
 		if (role === "lead" && parent?.role !== "boss") throw new Error("Only a Boss can own a Department Lead");
 		if (role === "worker" && parent?.role !== "lead") throw new Error("Only a Department Lead can own a Worker");
+		const identityKey = identity?.trim() || undefined;
+		resolveModelPattern(modelPool, identityKey);
 		const index = [...agents.values()].filter((agent) => agent.role === role).length + 1;
 		const agentId = `${role}-${index}`;
 		const departmentId = role === "lead" ? agentId : role === "worker" ? parent?.departmentId : undefined;
 		const agent: RuntimeAgent = {
-			actorEpoch: randomUUID(), agentId, configPath: "", departmentId, details: [], intentionalStop: false,
+			actorEpoch: randomUUID(), agentId, configPath: "", departmentId, details: [], identity: identityKey, intentionalStop: false,
 			name: name?.trim() || `${ROLE_NAMES[role]} ${index}`, parentId, pendingParentMessages: [], progressTimer: undefined, recoveryAttempts: 0, role, runCount: 0,
 			status: "starting", task: task.trim(), token: randomBytes(24).toString("hex"),
 		};
@@ -871,7 +882,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 				const reason = String(data.reason || "").trim();
 				if (!task) throw new Error("Delegated task is required");
 				if (!reason) throw new Error("Delegation reason is required");
-				const agent = await createAgent(role, task, actor.agentId, typeof data.name === "string" ? data.name : undefined);
+				const agent = await createAgent(role, task, actor.agentId, typeof data.name === "string" ? data.name : undefined, typeof data.identity === "string" ? data.identity : undefined);
 				appendEvent({
 					actorId: actor.agentId,
 					content: `Delegated ${agentPath(agent.agentId)}: ${reason}`,
@@ -894,6 +905,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			if (req.url === "/cancel") return json(res, 200, { cancelled: await cancelAgent(String(data.target || ""), actor) });
 			if (req.url === "/events") return json(res, 200, { events: roleVisibleEvents(actor, data.drillDown === true).slice(-Math.max(1, Math.min(100, Number(data.limit) || 30))) });
 			if (req.url === "/list") return json(res, 200, { agents: visibleAgents(actor) });
+			if (req.url === "/identities") return json(res, 200, { models: modelPool });
 			return json(res, 404, { error: "Not found" });
 		} catch (error) {
 			return json(res, 400, { error: error instanceof Error ? error.message : String(error) });
@@ -920,15 +932,25 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		return box;
 	});
 
+	pi.registerCommand("identities", { description: "Show the team identity pool", handler: (_args, ctx) => {
+		const entries = Object.entries(modelPool);
+		ctx.ui.notify(entries.length ? entries.map(([identity, pattern]) => `${identity}: ${pattern}`).join("\n") : "No identities configured. Add .pi/pi-team/identities.json with identity -> model pattern entries.", "info");
+	}});
 	pi.registerCommand("team", { description: "Show Pi Team status", handler: async (_args, ctx) => {
 		const sessionFile = context?.sessionManager.getSessionFile() ?? teamSessionMirror?.getSessionFile();
 		ctx.ui.notify(`${agents.size} agents; focused Boss: ${focusedBossId || "none"}; session: ${sessionFile || "not created"}; IPC: ${serverUrl || "starting"}`, "info");
 	}});
 	pi.registerCommand("boss", { description: "Create and focus a new Boss", handler: async (args, ctx) => {
-		const task = args.trim();
-		if (!task) return ctx.ui.notify("Usage: /boss <task>", "warning");
+		const parts = args.trim().split(/\s+/);
+		let identity: string | undefined;
+		let task = args.trim();
+		if (parts[0] === "--identity" && parts[1]) {
+			identity = parts[1];
+			task = parts.slice(2).join(" ");
+		}
+		if (!task) return ctx.ui.notify("Usage: /boss [--identity <name>] <task>", "warning");
 		try {
-			const agent = await createAgent("boss", task);
+			const agent = await createAgent("boss", task, undefined, undefined, identity);
 			focusedBossId = agent.agentId;
 			persistState(); updateUi();
 			ctx.ui.notify(`Created and focused ${agent.agentId}`, "info");

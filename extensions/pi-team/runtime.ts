@@ -5,6 +5,21 @@ export interface RpcPromptRequester {
 	request(command: { message: string; streamingBehavior: "steer"; type: "prompt" }): Promise<unknown>;
 }
 
+export type ModelPool = Record<string, string>;
+
+export const BUILTIN_IDENTITIES = ["text-high", "text-medium", "text-low", "vision-high", "vision-medium", "vision-low"] as const;
+
+export function readModelPool(poolPath: string): ModelPool {
+	return readJsonFile<ModelPool>(poolPath) ?? {};
+}
+
+export function resolveModelPattern(pool: ModelPool, identity?: string): string | undefined {
+	if (!identity) return pool.default;
+	const pattern = pool[identity];
+	if (!pattern) throw new Error(`Unknown identity: "${identity}". Add it to .pi/pi-team/identities.json; configured: ${Object.keys(pool).join(", ") || "none"}`);
+	return pattern;
+}
+
 export function formatProgress(progress: unknown): string {
 	const items = Array.isArray(progress) ? progress : [progress];
 	return items.filter((item): item is string => typeof item === "string").join("\n\n");

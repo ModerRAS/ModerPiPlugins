@@ -373,6 +373,10 @@ Inspector 作为 `nonCapturing` overlay，不手工把焦点设为 `null`。真�
 
 单次模型流无法从同一个 token 原地续传，单次工具进程也未必能从原指令位置续跑，但这不妨碍角色自动检查现实状态后继续同一个任务。只有达到有限恢复次数仍反复失败，或无法安全判断副作用时，才将任务标记为 `needs-attention` 并上屏请求用户处理。
 
+## 模型档位池（按业务选模型的中间件）
+
+档位池是给 Boss/Lead 委派时查的“档位 → 模型”选型表，按是否支持视觉 × 高中低共 6 档，只决定新角色用什么模型（价格/能力），不注入任何提示词。映射由用户在项目 `.pi/pi-team/identities.json` 配置（旧 `models.json` 兼容，identities 优先）。委派时 Boss/Lead 通过 `team_delegate.identity` 为新角色选择档位，角色可先用 `team_models` 查看池子。Supervisor 把档位解析为 `--model <pattern>` 传给子 Pi；未配置池或不指定档位时保持 Pi 默认解析，向后兼容。档位随 AgentRecord 持久化，恢复时重新解析。目标：规划/审查用深度推理档，简单操作用低价档，视觉调试用视觉档，降低整体 token 用量。
+
 ## 建议的实现顺序
 
 1. RPC smoke test：Windows 启动、插件继承、严格 JSONL、独立 Session、steer/abort/settled、父进程清理。

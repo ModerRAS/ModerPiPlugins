@@ -34,6 +34,31 @@ Boss 使用 `team_delegate` 创建 Lead，Lead 使用同一工具创建 Worker�
 
 `team_send` 的普通消息可发给同一 Pi Team 中任意其他 Boss、Lead 或 Worker。目标支持稳定 agent id、完整层级路径、这些形式前加 `@`，以及唯一显示名；显示名歧义、未知目标和 self-message 都会拒绝。该放宽只适用于消息，不改变委派、取消、角色列表或事件上下文的原有权限。
 
+## 模型档位池（按业务选模型的中间件）
+
+模型档位池是给 Boss/Lead 委派时看的一张“档位 → 模型”选型表：按是否支持视觉 × 高中低共 6 档，委派时选一个档位，只决定新角色用什么模型（价格/能力），不注入任何额外提示词。配置在项目 `.pi/pi-team/identities.json`（`.pi/` 已 gitignore，只在本机生效）：
+
+```json
+{
+  "default": "opencode-go/deepseek-v4-flash",
+  "text-high": "opencode-go/deepseek-v4-pro",
+  "text-medium": "opencode-go/deepseek-v4-flash",
+  "text-low": "opencode-go/deepseek-v4-flash",
+  "vision-high": "opencode-go/gpt-5.6-luna",
+  "vision-medium": "opencode-go/kimi-k2.7-code",
+  "vision-low": "opencode-go/mimo-v2.5"
+}
+```
+
+6 个档位即 6 种工作角色，建议用途：`text-high` 规划/审查（深度推理）、`text-medium` 常规执行与 CLI/TUI 调试、`text-low` git 等简单操作、`vision-high` 复杂 GUI 视觉调试、`vision-medium` 常规视觉调试、`vision-low` 简单视觉任务。
+
+- Boss 委派 Lead、Lead 委派 Worker 时，`team_delegate` 传 `identity: "<档位>"`（如 `text-medium`、`vision-high`），该档位对应的模型用于新建角色；未知档位会被拒绝并提示可用档位。
+- `/boss --identity <档位> <任务>` 可给 Boss 自己指定档位。
+- 不传 `identity` 时用 `default`；没有配置时沿用 Pi 自身的默认模型解析（不传 `--model`），完全向后兼容。
+- 角色在委派前可用 `team_models` 工具查看档位池；用户用 `/identities` 查看。
+- 模型 pattern 格式与 `pi --model` 一致（`provider/id` 或 `provider/id:thinking`）。档位会随 AgentRecord 持久化，重启恢复后重新解析池。
+- 兼容：旧 `models.json`（档位 → 模型）仍会读取，`identities.json` 优先。
+
 ## 行为
 
 - Team 有一个带 `Pi Team: ...` 名称的 Supervisor 主 Session，可从 Pi 原生 `/resume` 找到。恢复该 Session 会恢复正式群聊、组织结构、上次 focused Boss，并用各角色原有 Session 重启所有未取消角色。
