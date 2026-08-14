@@ -375,7 +375,7 @@ Inspector 作为 `nonCapturing` overlay，不手工把焦点设为 `null`。真�
 
 ## 模型档位池（按业务选模型的中间件）
 
-档位池是给 Boss/Lead 委派时查的“档位 → 模型”选型表，按是否支持视觉 × 高中低共 6 档，只决定新角色用什么模型（价格/能力），不注入任何提示词。映射由用户在项目 `.pi/pi-team/identities.json` 配置（旧 `models.json` 兼容，identities 优先）。委派时 Boss/Lead 通过 `team_delegate.identity` 为新角色选择档位，角色可先用 `team_models` 查看池子。Supervisor 把档位解析为 `--model <pattern>` 传给子 Pi；未配置池或不指定档位时保持 Pi 默认解析，向后兼容。档位随 AgentRecord 持久化，恢复时重新解析。目标：规划/审查用深度推理档，简单操作用低价档，视觉调试用视觉档，降低整体 token 用量。
+档位池是给 Boss/Lead 委派时查的“档位 → 模型”选型表，按是否支持视觉 × 高中低共 6 档，只决定新角色用什么模型（价格/能力），不注入任何提示词。映射由用户在项目 `.pi/pi-team/identities.json` 或全局 `~/.pi/agent/pi-team-identities.json` 配置（项目优先，旧 `models.json` 兼容）。不传 `identity` 时新角色默认使用主对话当前模型（所有角色同一模型）；传了才从档位池解析并传 `--model <pattern>` 给子 Pi；未知档位拒绝。档位随 AgentRecord 持久化，恢复时重新解析。目标：规划/审查用深度推理档，简单操作用低价档，视觉调试用视觉档，降低整体 token 用量。
 
 ## 建议的实现顺序
 

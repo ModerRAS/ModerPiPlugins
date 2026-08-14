@@ -20,6 +20,11 @@ export function resolveModelPattern(pool: ModelPool, identity?: string): string 
 	return pattern;
 }
 
+export function resolveSpawnModel(pool: ModelPool, identity: string | undefined, mainModel: { provider: string; id: string } | undefined): string | undefined {
+	if (identity) return resolveModelPattern(pool, identity);
+	return mainModel ? `${mainModel.provider}/${mainModel.id}` : undefined;
+}
+
 export function formatProgress(progress: unknown): string {
 	const items = Array.isArray(progress) ? progress : [progress];
 	return items.filter((item): item is string => typeof item === "string").join("\n\n");

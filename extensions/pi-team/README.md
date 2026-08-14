@@ -40,7 +40,6 @@ Boss 使用 `team_delegate` 创建 Lead，Lead 使用同一工具创建 Worker�
 
 ```json
 {
-  "default": "opencode-go/deepseek-v4-flash",
   "text-high": "opencode-go/deepseek-v4-pro",
   "text-medium": "opencode-go/deepseek-v4-flash",
   "text-low": "opencode-go/deepseek-v4-flash",
@@ -52,9 +51,9 @@ Boss 使用 `team_delegate` 创建 Lead，Lead 使用同一工具创建 Worker�
 
 6 个档位即 6 种工作角色，建议用途：`text-high` 规划/审查（深度推理）、`text-medium` 常规执行与 CLI/TUI 调试、`text-low` git 等简单操作、`vision-high` 复杂 GUI 视觉调试、`vision-medium` 常规视觉调试、`vision-low` 简单视觉任务。
 
-- Boss 委派 Lead、Lead 委派 Worker 时，`team_delegate` 传 `identity: "<档位>"`（如 `text-medium`、`vision-high`），该档位对应的模型用于新建角色；未知档位会被拒绝并提示可用档位。
+- 配置位置：项目 `.pi/pi-team/identities.json` 优先，其次 `.pi/pi-team/models.json`（旧格式），再次全局 `~/.pi/agent/pi-team-identities.json`；都没有时 `identity` 档位不可用。
+- 默认模型：不传 `identity` 时，新角色直接使用主对话当前模型（所有角色默认同一模型）；传了 `identity` 才从档位池解析模型，未知档位拒绝。
 - `/boss --identity <档位> <任务>` 可给 Boss 自己指定档位。
-- 不传 `identity` 时用 `default`；没有配置时沿用 Pi 自身的默认模型解析（不传 `--model`），完全向后兼容。
 - 角色在委派前可用 `team_models` 工具查看档位池；用户用 `/identities` 查看。
 - 模型 pattern 格式与 `pi --model` 一致（`provider/id` 或 `provider/id:thinking`）。档位会随 AgentRecord 持久化，重启恢复后重新解析池。
 - 兼容：旧 `models.json`（档位 → 模型）仍会读取，`identities.json` 优先。

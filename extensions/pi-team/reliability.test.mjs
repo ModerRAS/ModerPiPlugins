@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BUILTIN_IDENTITIES, formatProgress, readJsonFile, readJsonLines, readModelPool, resolveModelPattern, sendRpcPrompt, writeJsonAtomic } from "./runtime.ts";
+import { BUILTIN_IDENTITIES, formatProgress, readJsonFile, readJsonLines, readModelPool, resolveModelPattern, resolveSpawnModel, sendRpcPrompt, writeJsonAtomic } from "./runtime.ts";
 
 test("formatProgress accepts preformatted and array progress", () => {
 	const progress = ["first update", "second update"];
@@ -55,6 +55,16 @@ test("identities.json overrides models.json", async () => {
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
+});
+
+test("spawn model falls back to main conversation model when no identity", () => {
+	const pool = { "text-low": "opencode-go/mimo-v2.5-pro" };
+	const main = { provider: "opencode-go", id: "deepseek-v4-flash" };
+
+	assert.equal(resolveSpawnModel(pool, undefined, main), "opencode-go/deepseek-v4-flash");
+	assert.equal(resolveSpawnModel(pool, "text-low", main), "opencode-go/mimo-v2.5-pro");
+	assert.equal(resolveSpawnModel(pool, undefined, undefined), undefined);
+	assert.throws(() => resolveSpawnModel(pool, "nope", main), /Unknown identity/);
 });
 
 test("model pool loads from user file", async () => {

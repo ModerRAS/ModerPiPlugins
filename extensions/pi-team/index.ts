@@ -4,6 +4,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, readdirSync, statS
 import { randomBytes, randomUUID } from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { basename, dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Box, Text, truncateToWidth, visibleWidth, type TUI } from "@earendil-works/pi-tui";
@@ -21,6 +22,7 @@ import {
 	readModelPool,
 	registerRoleExtension,
 	resolveModelPattern,
+	resolveSpawnModel,
 	sendRpcPrompt,
 	writeJsonAtomic,
 	type AgentRecord,
@@ -454,7 +456,11 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 
 		stateRoot = join(ctx.cwd, CONFIG_DIR_NAME, "pi-team");
 		mkdirSync(stateRoot, { recursive: true });
-		modelPool = { ...readModelPool(join(stateRoot, "models.json")), ...readModelPool(join(stateRoot, "identities.json")) };
+		modelPool = {
+			...readModelPool(join(homedir(), CONFIG_DIR_NAME, "agent", "pi-team-identities.json")),
+			...readModelPool(join(stateRoot, "models.json")),
+			...readModelPool(join(stateRoot, "identities.json")),
+		};
 		stateDir = join(stateRoot, ctx.sessionManager.getSessionId());
 		if (!saved && !mainSessionPersists() && reason !== "new" && reason !== "fork") {
 			const standalone = findStandaloneState(stateRoot);
@@ -695,7 +701,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		} else {
 			args.push("--session-dir", sessionDir);
 		}
-		const modelPattern = resolveModelPattern(modelPool, agent.identity);
+		const modelPattern = resolveSpawnModel(modelPool, agent.identity, context?.model);
 		if (modelPattern) args.push("--model", modelPattern);
 		const invocation = getPiInvocation(args);
 		const child = spawn(invocation.command, invocation.args, { cwd: context!.cwd, shell: false, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
