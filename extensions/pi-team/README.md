@@ -30,7 +30,7 @@ pi install /absolute/path/to/ModerPiPlugins/extensions/pi-team
 - `/inspect <agent-id>`：让右侧被动 Inspector 持续显示该角色的工具和 RPC 细节；`/inspect off` 返回团队活动。
 - `/team`：查看 Team 摘要和内部 IPC 地址。
 
-Boss 使用 `team_delegate` 创建 Lead，Lead 使用同一工具创建 Worker；两者还可使用 `team_send`、`team_read`、`team_list` 和 `team_cancel`。Worker 只有读取、列举和直属上下级通信能力。
+Boss 使用 `team_delegate` 创建 Lead，Lead 使用同一工具创建 Worker；两者还可使用 `team_send`、`team_read`、`team_list` 和 `team_cancel`。Worker 完整继承 Pi 的实现工具；只在 Team 管理权限上受限为 `team_send`、`team_read` 和 `team_list`，不能继续委派或取消其他角色。
 
 ## 行为
 
