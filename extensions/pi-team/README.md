@@ -36,7 +36,13 @@ Boss 使用 `team_delegate` 创建 Lead，Lead 使用同一工具创建 Worker�
 
 - 每个角色是独立的 `pi --mode rpc` 进程和 Session，并继承用户正常安装的资源。
 - 所有角色直接共享当前工作目录；插件不加锁、不创建 worktree，也不自动合并。
-- 普通角色文本写入线性正式事件日志；工具调用、stderr 和协议细节只进入 Inspector 缓冲。
+- 所有 Boss、Lead、Worker 的正常文本都写入线性正式事件日志并在主 transcript 上屏；右侧被动面板只显示角色状态、派工/控制/错误摘要和 Inspector 细节。
+- Boss 与 Lead 是事件驱动协调者，不直接承担实质项目实现：Boss 把一个连贯工作流交给一个 Lead，Lead 把一个连贯执行任务交给一个 Worker；只有真正独立的领域或并行任务才增加角色。处理当前事件后停止，没有新外部事件时保持 idle。
+- Worker 的正常文本实时进入主 transcript；Worker `agent_settled` 后 Supervisor 必定通知直属 Lead。Lead 正在运行时通知用 `steer` 合入当前 loop，Lead idle 时自动改用 `prompt` 启动新 loop；临近报告会批量合并。
+- 每次角色被唤醒，Supervisor 自动注入该角色上次事件游标之后、截至本次唤醒的全部可见正式事件。Lead 因此无需主动轮询也能拿到期间所有直属 Worker 消息；游标随 Team 状态持久化。
+- 运行中的 Worker 每 10 分钟触发一次 Lead 巡检并继续重复，直到 Worker settled、cancelled 或退出。即使区间内没有新 assistant 文本，也会明确报告仍在运行。
+- 侧栏和 `/agents` 的 `rN` 是持久化 `runCount`，只按真实 RPC `agent_start` 递增，用于区分一轮内的多条 assistant 消息与多次 agent loop。
+- 委派数量按任务动态决定；4 是安全上限而不是目标。新角色必须有具体的独立工作理由，并优先复用现有合适角色。
 - Supervisor IPC 只监听 loopback，并验证 `agentId + actorEpoch + instanceToken`。
 - 意外退出会以新的 epoch/token 从 Session 副本恢复，并要求角色先检查实际工作区状态。
 - `/new` 创建空 Team；`/resume` 恢复 Team；`/fork` 复制 Team 前缀；树分支切换会停止旧角色并恢复目标分支。

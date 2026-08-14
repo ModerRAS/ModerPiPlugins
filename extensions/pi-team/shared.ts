@@ -33,10 +33,13 @@ export interface AgentRecord {
 	actorEpoch: string;
 	agentId: string;
 	departmentId?: string;
+	lastContextSeq?: number;
 	name: string;
 	parentId?: string;
+	path?: string;
 	pid?: number;
 	role: TeamRole;
+	runCount?: number;
 	sessionPath?: string;
 	status: AgentStatus;
 	task: string;
@@ -137,10 +140,20 @@ export function registerRoleExtension(pi: ExtensionAPI, expectedRole: TeamRole):
 			label: "Team Delegate",
 			description:
 				expectedRole === "boss"
-					? "Create a Department Lead to own a workstream. A Boss may create up to four leads."
-					: "Create a Worker for a concrete task. A Department Lead may run up to four workers.",
+					? "Delegate substantive project execution to the minimum sufficient Department Leads. One coherent workstream normally needs one Lead; capacity is not a target."
+					: "Delegate substantive execution to the minimum sufficient Workers. One coherent task normally needs one Worker; capacity is not a target.",
+			promptGuidelines: expectedRole === "boss"
+				? [
+					"Do not implement substantive project work yourself; scope it and delegate execution to the minimum sufficient Leads.",
+					"Use one Lead for one coherent workstream and add more only for genuinely independent domains.",
+				]
+				: [
+					"Do not implement substantive Worker tasks yourself; coordinate, review, and delegate execution.",
+					"Use one Worker for one coherent task and add more only for genuinely independent parallel work.",
+				],
 			parameters: Type.Object({
-				task: Type.String({ description: "Concrete delegated task" }),
+				task: Type.String({ description: "Concrete delegated task with a verifiable outcome" }),
+				reason: Type.String({ minLength: 12, description: "Why this needs a new role rather than a suitable existing subordinate" }),
 				name: Type.Optional(Type.String({ description: "Short display name" })),
 			}),
 			async execute(_id, params) {
@@ -190,7 +203,7 @@ export function registerRoleExtension(pi: ExtensionAPI, expectedRole: TeamRole):
 		parameters: Type.Object({}),
 		async execute() {
 			const result = await request<{ agents: AgentRecord[] }>(config, "/list", {});
-			const text = result.agents.map((agent) => `${agent.agentId} [${agent.role}/${agent.status}] ${agent.task}`).join("\n");
+			const text = result.agents.map((agent) => `${agent.path || agent.agentId} [${agent.role}/${agent.status} r${agent.runCount ?? 0}] ${agent.task}`).join("\n");
 			return { content: [{ type: "text", text: text || "No team agents." }], details: result };
 		},
 	});

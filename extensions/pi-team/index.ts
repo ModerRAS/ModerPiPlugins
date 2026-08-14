@@ -30,8 +30,8 @@ const TEAM_WIDGET_KEY = "pi-team-agents";
 const RECOVERY_LIMIT = 3;
 const ROLE_NAMES: Record<TeamRole, string> = { boss: "Boss", lead: "Lead", worker: "Worker" };
 const ROLE_PROMPTS: Record<TeamRole, string> = {
-	boss: `You are a Boss in a Pi coding team. You own one user workstream, understand requirements, make decisions, and report directly to the user. Delegate sustained areas to Department Leads using team_delegate. Do not micromanage Workers. Read lead reports, resolve cross-department issues, and explain your actions normally; your normal assistant text is visible to the user.`,
-	lead: `You are a Department Lead in a Pi coding team. You own one department under a Boss. Supervise, correct, and coordinate up to four Workers using team_delegate. You see your department's messages and should absorb routine details, then report useful conclusions, conflicts, and decisions to your Boss in normal assistant text.`,
+	boss: `You are a Boss in a Pi coding team. You are a strictly event-driven coordinator and decision-maker, not a project implementer. For substantive project work, do not edit files, run implementation commands, or carry out the task yourself. Inspect only enough to scope and verify, then reuse or create the minimum sufficient Department Leads: one coherent workstream normally needs one Lead; add Leads only for genuinely independent domains. Act only on the current user message or a new Lead report. Handle that event by deciding, delegating, verifying, or reporting, then stop and remain idle until another external event arrives. Never invent follow-up work or keep working merely to stay busy. Team capacity is a safety ceiling, never a target. Before adding another Lead, call team_list and explain why existing Leads cannot own the work. Trivial questions, status checks, and Team control commands may be answered directly without delegation.`,
+	lead: `You are a Department Lead in a Pi coding team. You are an event-driven coordinator and reviewer, not a project implementer. For substantive execution, do not edit files or carry out Worker tasks yourself. On a Boss assignment, scope it, reuse or create the minimum useful Workers, send concrete tasks, then stop and remain idle. One coherent execution task normally needs one Worker; add Workers only for genuinely independent parallel work. Worker progress, settled/idle, crash, and recovery reports will wake you. On those events, inspect the report, intervene only when correction or unblocking is needed, summarize meaningful completion or risk to your Boss, then stop and idle again. Do not create routine follow-up work merely to stay active. Team capacity is a safety ceiling, never a target. Before adding another Worker, call team_list and explain why existing Workers cannot handle it.`,
 	worker: `You are a Worker in a Pi coding team. Execute the concrete task assigned to you using the full Pi tool environment. You receive only task-relevant messages. Explain your next actions and findings normally; your text is visible to your Department Lead and the user. Ask your Lead when blocked. You cannot create other agents.`,
 };
 
@@ -64,6 +64,8 @@ interface RuntimeAgent extends AgentRecord {
 	configPath: string;
 	details: string[];
 	intentionalStop: boolean;
+	pendingParentMessages: string[];
+	progressTimer?: ReturnType<typeof setTimeout>;
 	process?: ChildProcessWithoutNullStreams;
 	recoveryAttempts: number;
 	rpc?: RpcClient;
@@ -168,14 +170,26 @@ class TeamActivityPanel {
 		private getEvents: () => TeamEvent[],
 		private getFocusedBoss: () => string | undefined,
 		private getInspectedAgent: () => RuntimeAgent | undefined,
+		private isMainEvent: (event: TeamEvent) => boolean,
 	) {}
 
 	render(width: number): string[] {
 		const inner = Math.max(10, width - 2);
+		const allAgents = this.getAgents();
+		const byId = new Map(allAgents.map((agent) => [agent.agentId, agent]));
+		const pathOf = (agentId: string): string => {
+			const parts: string[] = [];
+			let current = byId.get(agentId);
+			while (current) {
+				parts.unshift(current.agentId);
+				current = current.parentId ? byId.get(current.parentId) : undefined;
+			}
+			return parts.length ? parts.join("/") : agentId;
+		};
 		const inspected = this.getInspectedAgent();
 		if (inspected) {
 			const lines = [
-				`INSPECT ${inspected.agentId}`,
+				`INSPECT ${pathOf(inspected.agentId)}`,
 				`[${inspected.role}/${inspected.status}]`,
 				`Task: ${inspected.task}`,
 				"",
@@ -187,15 +201,14 @@ class TeamActivityPanel {
 				`└${"─".repeat(inner)}┘`,
 			];
 		}
-		const agents = this.getAgents().slice(0, 12).map((agent) => {
+		const agents = allAgents.slice(0, 12).map((agent) => {
 			const focus = agent.agentId === this.getFocusedBoss() ? ">" : " ";
-			return `${focus} ${agent.agentId} [${agent.status}]`;
+			return `${focus} ${pathOf(agent.agentId)} [${agent.status} r${agent.runCount ?? 0}]`;
 		});
-		const focusedBoss = this.getFocusedBoss();
 		const activity = this.getEvents()
-			.filter((event) => !(event.actorId === focusedBoss || (event.actorId === "user" && event.targetIds.includes(focusedBoss || ""))))
+			.filter((event) => !this.isMainEvent(event))
 			.slice(-12)
-			.map((event) => `${event.actorId}: ${event.content}`);
+			.map((event) => `${pathOf(event.actorId)}: ${event.content}`);
 		const lines = ["PI TEAM", ...agents, "", "ACTIVITY", ...activity];
 		return [
 			`┌${"─".repeat(inner)}┐`,
@@ -239,11 +252,26 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	let closeActivityPanel: (() => void) | undefined;
 	const agents = new Map<string, RuntimeAgent>();
 	const events: TeamEvent[] = [];
+	const parentNotifications = new Map<string, { messages: string[]; timer?: ReturnType<typeof setTimeout> }>();
 	const extensionPath = fileURLToPath(import.meta.url);
 
+	function agentPath(agentId: string): string {
+		const parts: string[] = [];
+		let current = agents.get(agentId);
+		while (current) {
+			parts.unshift(current.agentId);
+			current = current.parentId ? agents.get(current.parentId) : undefined;
+		}
+		return parts.length ? parts.join("/") : agentId;
+	}
+
+	function resolveAgent(reference: string): RuntimeAgent | undefined {
+		return agents.get(reference) ?? [...agents.values()].find((agent) => agentPath(agent.agentId) === reference);
+	}
+
 	function publicAgent(agent: RuntimeAgent): AgentRecord {
-		const { configPath: _configPath, details: _details, intentionalStop: _intentionalStop, process: _process, recoveryAttempts: _recoveryAttempts, rpc: _rpc, token: _token, ...record } = agent;
-		return record;
+		const { configPath: _configPath, details: _details, intentionalStop: _intentionalStop, pendingParentMessages: _pendingParentMessages, progressTimer: _progressTimer, process: _process, recoveryAttempts: _recoveryAttempts, rpc: _rpc, token: _token, ...record } = agent;
+		return { ...record, path: agentPath(agent.agentId) };
 	}
 
 	function snapshot(): PersistedState {
@@ -263,13 +291,17 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		return event;
 	}
 
+	function isMainTranscriptEvent(event: TeamEvent): boolean {
+		return event.kind === "message";
+	}
+
 	function updateUi(): void {
 		if (!context?.hasUI) return;
 		const list = [...agents.values()];
 		context.ui.setStatus(TEAM_STATUS_KEY, `team ${list.filter((a) => a.status === "running").length}/${list.length}`);
 		const lines = list.slice(0, 12).map((agent) => {
 			const focus = agent.agentId === focusedBossId ? ">" : " ";
-			return `${focus} ${agent.agentId} [${agent.role}/${agent.status}] ${truncate(agent.task, 55)}`;
+			return `${focus} ${agentPath(agent.agentId)} [${agent.role}/${agent.status} r${agent.runCount ?? 0}] ${truncate(agent.task, 55)}`;
 		});
 		context.ui.setWidget(TEAM_WIDGET_KEY, lines.length ? lines : ["Pi Team: /boss <task> to start"], { placement: "belowEditor" });
 		activityPanel?.requestRender();
@@ -285,6 +317,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 				() => events,
 				() => focusedBossId,
 				() => inspectedAgentId ? agents.get(inspectedAgentId) : undefined,
+				isMainTranscriptEvent,
 			);
 			return activityPanel;
 		}, {
@@ -295,9 +328,9 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 				minWidth: 36,
 				maxHeight: "90%",
 				margin: { right: 1 },
+				nonCapturing: true,
 				visible: (terminalWidth) => terminalWidth >= 100,
 			},
-			onHandle: (handle) => handle.unfocus({ target: null }),
 		}).finally(() => {
 			activityPanel = undefined;
 			closeActivityPanel = undefined;
@@ -306,6 +339,8 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 
 	function reconstruct(ctx: ExtensionContext, reason: string): void {
 		context = ctx;
+		for (const batch of parentNotifications.values()) if (batch.timer) clearTimeout(batch.timer);
+		parentNotifications.clear();
 		agents.clear();
 		events.length = 0;
 		seq = 0;
@@ -329,9 +364,11 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 					configPath: "",
 					details: [],
 					intentionalStop: false,
+					pendingParentMessages: [],
 					process: undefined,
 					recoveryAttempts: 0,
 					rpc: undefined,
+					runCount: record.runCount ?? 0,
 					status: record.status === "cancelled" ? "cancelled" : "recovering",
 					token: randomBytes(24).toString("hex"),
 				});
@@ -360,11 +397,9 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	}
 
 	function buildInitialPrompt(agent: RuntimeAgent, recovering: boolean): string {
-		const visible = roleVisibleEvents(agent).slice(-80);
-		const group = visible.map((event) => `#${event.seq} ${event.actorId}: ${event.content}`).join("\n");
 		return recovering
-			? `Your Pi Team process was restarted unexpectedly. Continue the same task after checking the current session and workspace state. Do not blindly repeat side effects.\n\nTask: ${agent.task}\n\nRecent formal group chat:\n${group || "(none)"}`
-			: `Begin your assigned Pi Team role now.\n\nTask: ${agent.task}\n\nFormal group chat available at creation:\n${group || "(none)"}`;
+			? `Your Pi Team process was restarted unexpectedly. Continue the same task after checking the current session and workspace state. Do not blindly repeat side effects.\n\nTask: ${agent.task}`
+			: `Begin your assigned Pi Team role now.\n\nTask: ${agent.task}`;
 	}
 
 	function addDetail(agent: RuntimeAgent, line: string): void {
@@ -379,34 +414,98 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 
 	async function deliver(agent: RuntimeAgent, message: string, behavior: "steer" | "followUp" = "steer"): Promise<void> {
 		if (!agent.rpc) throw new Error(`${agent.agentId} is not connected`);
+		const pendingBatch = parentNotifications.get(agent.agentId);
+		if (pendingBatch) {
+			if (pendingBatch.timer) clearTimeout(pendingBatch.timer);
+			parentNotifications.delete(agent.agentId);
+			message = [...pendingBatch.messages, message].join("\n\n---\n\n");
+		}
+		const throughSeq = seq;
+		const unseen = roleVisibleEvents(agent)
+			.filter((event) => event.seq > (agent.lastContextSeq ?? 0) && event.actorId !== agent.agentId)
+			.map((event) => `#${event.seq} ${agentPath(event.actorId)} [${event.kind}]: ${event.content}`)
+			.join("\n");
+		const enriched = unseen ? `Formal Team events since your previous wake:\n${unseen}\n\nIncoming wake signal:\n${message}` : message;
 		const type = agent.status === "running" ? behavior === "steer" ? "steer" : "follow_up" : "prompt";
-		await agent.rpc.request({ type, message });
+		await agent.rpc.request({ type, message: enriched });
+		agent.lastContextSeq = Math.max(agent.lastContextSeq ?? 0, throughSeq);
+		persistState();
 	}
 
 	async function publishAssistantText(agent: RuntimeAgent, text: string): Promise<void> {
 		if (!text) return;
+		agent.pendingParentMessages.push(text);
 		appendEvent({ actorId: agent.agentId, content: text, departmentId: agent.departmentId, kind: "message", targetIds: agent.parentId ? [agent.parentId] : [] });
+	}
+
+	function scheduleWorkerInspection(agent: RuntimeAgent): void {
+		if (agent.role !== "worker" || agent.progressTimer || agent.status !== "running") return;
+		agent.progressTimer = setTimeout(() => {
+			agent.progressTimer = undefined;
+			if (agent.status !== "running") return;
+			const progress = agent.pendingParentMessages.join("\n\n");
+			agent.pendingParentMessages.length = 0;
+			appendEvent({
+				actorId: "supervisor",
+				content: `${agentPath(agent.agentId)} is still running at the 10-minute inspection`,
+				departmentId: agent.departmentId,
+				kind: "status",
+				targetIds: agent.parentId ? [agent.parentId] : [],
+			});
+			void notifyParent(agent, `[${agentPath(agent.agentId)} worker 10-minute inspection}]\n${progress.length ? progress.join("\n\n") : "Still running; no new assistant text in this interval."}`);
+			scheduleWorkerInspection(agent);
+		}, 10 * 60_000);
+	}
+
+	async function notifyParent(agent: RuntimeAgent, message: string): Promise<void> {
 		const parent = parentOf(agent);
-		if (parent && parent.status !== "cancelled") {
-			try {
-				await deliver(parent, `[${agent.agentId} ${agent.role}] ${text}`, "steer");
-			} catch (error) {
-				addDetail(parent, `delivery failed: ${error instanceof Error ? error.message : String(error)}`);
-			}
+		if (!parent || parent.status === "cancelled") return;
+		let batch = parentNotifications.get(parent.agentId);
+		if (!batch) {
+			batch = { messages: [] };
+			parentNotifications.set(parent.agentId, batch);
 		}
+		batch.messages.push(message);
+		if (batch.timer) clearTimeout(batch.timer);
+		batch.timer = setTimeout(() => {
+			const current = parentNotifications.get(parent.agentId);
+			if (!current) return;
+			parentNotifications.delete(parent.agentId);
+			if (parent.status === "cancelled") return;
+			const combined = current.messages.join("\n\n---\n\n");
+			deliver(parent, combined, "steer").catch((error) => {
+				addDetail(parent, `delivery failed: ${error instanceof Error ? error.message : String(error)}`);
+			});
+		}, 1_500);
 	}
 
 	function onRpcEvent(agent: RuntimeAgent, event: any): void {
 		switch (event.type) {
 			case "agent_start":
 				agent.status = "running";
+				agent.runCount = (agent.runCount ?? 0) + 1;
+				scheduleWorkerInspection(agent);
+				persistState();
 				addDetail(agent, "agent started");
 				break;
-			case "agent_settled":
+			case "agent_settled": {
 				agent.status = "idle";
+				if (agent.progressTimer) clearTimeout(agent.progressTimer);
+				agent.progressTimer = undefined;
 				addDetail(agent, "agent settled");
 				persistState();
+				const report = agent.pendingParentMessages.join("\n\n");
+				agent.pendingParentMessages.length = 0;
+				appendEvent({
+					actorId: "supervisor",
+					content: `${agentPath(agent.agentId)} settled and is idle`,
+					departmentId: agent.departmentId,
+					kind: "status",
+					targetIds: agent.parentId ? [agent.parentId] : [],
+				});
+				void notifyParent(agent, `[${agentPath(agent.agentId)} ${agent.role} settled/idle}]${report ? `\n${report}` : "\nNo new assistant text since the previous inspection."}`);
 				break;
+			}
 			case "message_update": {
 				const delta = event.assistantMessageEvent;
 				if (delta?.type === "text_delta") addDetail(agent, delta.delta);
@@ -505,10 +604,21 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			agent.process = undefined;
 			agent.pid = undefined;
 			addDetail(agent, `process exited code=${code} signal=${signal}`);
-			if (!shuttingDown && !agent.intentionalStop && agent.status !== "cancelled") void recoverAgent(agent);
+			const unexpected = !shuttingDown && !agent.intentionalStop && agent.status !== "cancelled";
+			if (unexpected) {
+				appendEvent({
+					actorId: "supervisor",
+					content: `${agentPath(agent.agentId)} crashed and is recovering (code=${code}, signal=${signal})`,
+					departmentId: agent.departmentId,
+					kind: "error",
+					targetIds: agent.parentId ? [agent.parentId] : [],
+				});
+				void notifyParent(agent, `[${agentPath(agent.agentId)} crashed] Supervisor is recovering the same session. Wait for a settled/idle report before treating the task as complete.`);
+				void recoverAgent(agent);
+			}
 		});
 		await waitForReady(agent);
-		appendEvent({ actorId: "supervisor", content: `${agent.agentId} [${agent.role}] started: ${agent.task}`, departmentId: agent.departmentId, kind: "status", targetIds: agent.parentId ? [agent.parentId] : [] });
+		appendEvent({ actorId: "supervisor", content: `${agentPath(agent.agentId)} [${agent.role}] started: ${agent.task}`, departmentId: agent.departmentId, kind: "status", targetIds: agent.parentId ? [agent.parentId] : [] });
 		await deliver(agent, buildInitialPrompt(agent, recovering));
 		updateUi();
 	}
@@ -516,7 +626,8 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	async function recoverAgent(agent: RuntimeAgent): Promise<void> {
 		if (agent.recoveryAttempts >= RECOVERY_LIMIT) {
 			agent.status = "failed";
-			appendEvent({ actorId: "supervisor", content: `${agent.agentId} recovery failed after ${RECOVERY_LIMIT} attempts`, departmentId: agent.departmentId, kind: "error", targetIds: agent.parentId ? [agent.parentId] : [] });
+			appendEvent({ actorId: "supervisor", content: `${agentPath(agent.agentId)} recovery failed after ${RECOVERY_LIMIT} attempts`, departmentId: agent.departmentId, kind: "error", targetIds: agent.parentId ? [agent.parentId] : [] });
+			void notifyParent(agent, `[${agentPath(agent.agentId)} recovery failed] The role could not restart after ${RECOVERY_LIMIT} attempts and needs attention.`);
 			persistState();
 			return;
 		}
@@ -550,7 +661,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		const departmentId = role === "lead" ? agentId : role === "worker" ? parent?.departmentId : undefined;
 		const agent: RuntimeAgent = {
 			actorEpoch: randomUUID(), agentId, configPath: "", departmentId, details: [], intentionalStop: false,
-			name: name?.trim() || `${ROLE_NAMES[role]} ${index}`, parentId, recoveryAttempts: 0, role,
+			name: name?.trim() || `${ROLE_NAMES[role]} ${index}`, parentId, pendingParentMessages: [], progressTimer: undefined, recoveryAttempts: 0, role, runCount: 0,
 			status: "starting", task: task.trim(), token: randomBytes(24).toString("hex"),
 		};
 		agents.set(agentId, agent);
@@ -584,6 +695,8 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	async function stopProcess(agent: RuntimeAgent): Promise<void> {
 		agent.intentionalStop = true;
 		agent.status = "cancelled";
+		if (agent.progressTimer) clearTimeout(agent.progressTimer);
+		agent.progressTimer = undefined;
 		try { await agent.rpc?.request({ type: "abort" }, 2000); } catch {}
 		if (agent.pid && process.platform === "win32") {
 			await pi.exec("taskkill", ["/PID", String(agent.pid), "/T", "/F"], { timeout: 5000 }).catch(() => undefined);
@@ -594,12 +707,12 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	}
 
 	async function cancelAgent(agentId: string, requester?: RuntimeAgent): Promise<string[]> {
-		const target = agents.get(agentId);
+		const target = resolveAgent(agentId);
 		if (!target) throw new Error(`Unknown agent: ${agentId}`);
 		if (requester && target.parentId !== requester.agentId) throw new Error(`${requester.agentId} may only cancel direct subordinates`);
 		const list = [...descendants(agentId), target];
 		for (const agent of list) await stopProcess(agent);
-		appendEvent({ actorId: requester?.agentId || "user", content: `Cancelled ${list.map((a) => a.agentId).join(", ")}`, kind: "control", targetIds: list.map((a) => a.agentId) });
+		appendEvent({ actorId: requester?.agentId || "user", content: `Cancelled ${list.map((a) => agentPath(a.agentId)).join(", ")}`, kind: "control", targetIds: list.map((a) => a.agentId) });
 		persistState();
 		updateUi();
 		return list.map((agent) => agent.agentId);
@@ -644,11 +757,22 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			const data = await body(req);
 			if (req.url === "/delegate") {
 				const role: TeamRole = actor.role === "boss" ? "lead" : actor.role === "lead" ? "worker" : (() => { throw new Error("Workers cannot delegate"); })();
-				const agent = await createAgent(role, String(data.task || ""), actor.agentId, typeof data.name === "string" ? data.name : undefined);
+				const task = String(data.task || "").trim();
+				const reason = String(data.reason || "").trim();
+				if (!task) throw new Error("Delegated task is required");
+				if (!reason) throw new Error("Delegation reason is required");
+				const agent = await createAgent(role, task, actor.agentId, typeof data.name === "string" ? data.name : undefined);
+				appendEvent({
+					actorId: actor.agentId,
+					content: `Delegated ${agentPath(agent.agentId)}: ${reason}`,
+					departmentId: agent.departmentId,
+					kind: "assignment",
+					targetIds: [agent.agentId],
+				});
 				return json(res, 200, { agent: publicAgent(agent) });
 			}
 			if (req.url === "/send") {
-				const target = agents.get(String(data.target || ""));
+				const target = resolveAgent(String(data.target || ""));
 				if (!target) throw new Error("Unknown target");
 				if (!canMessage(actor, target)) throw new Error(`${actor.agentId} may only message its direct parent or children`);
 				const message = String(data.message || "").trim();
@@ -679,11 +803,10 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 
 	pi.registerEntryRenderer<TeamEvent>(TEAM_EVENT_ENTRY, (entry, { expanded }, theme) => {
 		const event = entry.data!;
-		const isFocusedConversation = event.actorId === focusedBossId || (event.actorId === "user" && event.targetIds.includes(focusedBossId || ""));
-		if (!isFocusedConversation) return undefined;
+		if (!isMainTranscriptEvent(event)) return undefined;
 		const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
-		box.addChild(new Text(`${theme.fg(event.kind === "error" ? "error" : "accent", `[${event.actorId}]`)} ${event.content}`, 0, 0));
-		if (expanded) box.addChild(new Text(theme.fg("dim", `#${event.seq} -> ${event.targetIds.join(", ") || "group"} · ${event.timestamp}`), 0, 0));
+		box.addChild(new Text(`${theme.fg(event.kind === "error" ? "error" : "accent", `[${agentPath(event.actorId)}]`)} ${event.content}`, 0, 0));
+		if (expanded) box.addChild(new Text(theme.fg("dim", `#${event.seq} -> ${event.targetIds.map(agentPath).join(", ") || "group"} · ${event.timestamp}`), 0, 0));
 		return box;
 	});
 
@@ -703,13 +826,13 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	pi.registerCommand("to", { description: "Send a directed message to a team agent", handler: async (args, ctx) => {
 		const match = args.trim().match(/^(\S+)\s+([\s\S]+)$/);
 		if (!match) return ctx.ui.notify("Usage: /to <agent-id> <message>", "warning");
-		const agent = agents.get(match[1]);
+		const agent = resolveAgent(match[1]);
 		if (!agent) return ctx.ui.notify(`Unknown agent: ${match[1]}`, "error");
 		appendEvent({ actorId: "user", content: match[2], departmentId: agent.departmentId, kind: "message", targetIds: [agent.agentId] });
 		try { await deliver(agent, `[User] ${match[2]}`); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
 	}});
 	pi.registerCommand("focus", { description: "Route ordinary input to a Boss", handler: async (args, ctx) => {
-		const agent = agents.get(args.trim());
+		const agent = resolveAgent(args.trim());
 		if (!agent || agent.role !== "boss") return ctx.ui.notify("Usage: /focus <boss-id>", "warning");
 		focusedBossId = agent.agentId; persistState(); updateUi(); ctx.ui.notify(`Focused ${agent.agentId}`, "info");
 	}});
@@ -717,12 +840,12 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		try { await cancelAgent(args.trim()); } catch (error) { ctx.ui.notify(error instanceof Error ? error.message : String(error), "error"); }
 	}});
 	pi.registerCommand("agents", { description: "List Pi Team agents", handler: async (_args, ctx) => {
-		ctx.ui.notify([...agents.values()].map((agent) => `${agent.agentId} [${agent.role}/${agent.status}] ${agent.task}`).join("\n") || "No agents.", "info");
+		ctx.ui.notify([...agents.values()].map((agent) => `${agentPath(agent.agentId)} [${agent.role}/${agent.status} r${agent.runCount ?? 0}] ${agent.task}`).join("\n") || "No agents.", "info");
 	}});
 	pi.registerCommand("view", { description: "View recent formal group-chat events", handler: async (args, ctx) => {
 		const requested = Number.parseInt(args.trim(), 10);
 		const limit = Number.isFinite(requested) ? Math.max(1, Math.min(100, requested)) : 30;
-		const lines = events.slice(-limit).map((event) => `#${event.seq} ${event.actorId} -> ${event.targetIds.join(",") || "group"}: ${event.content}`);
+		const lines = events.slice(-limit).map((event) => `#${event.seq} ${agentPath(event.actorId)} -> ${event.targetIds.map(agentPath).join(",") || "group"}: ${event.content}`);
 		ctx.ui.notify(lines.join("\n") || "No team events.", "info");
 	}});
 	pi.registerCommand("inspect", { description: "Show one agent's RPC activity in the passive side panel", handler: async (args, ctx) => {
@@ -732,11 +855,11 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			updateUi();
 			return;
 		}
-		const agent = agents.get(target);
+		const agent = resolveAgent(target);
 		if (!agent) return ctx.ui.notify("Usage: /inspect <agent-id|off>", "warning");
 		inspectedAgentId = agent.agentId;
 		updateUi();
-		ctx.ui.notify([`${agent.agentId} [${agent.role}/${agent.status}]`, `Task: ${agent.task}`, ...agent.details.slice(-10)].join("\n"), "info");
+		ctx.ui.notify([`${agentPath(agent.agentId)} [${agent.role}/${agent.status} r${agent.runCount ?? 0}]`, `Task: ${agent.task}`, ...agent.details.slice(-10)].join("\n"), "info");
 	}});
 
 	pi.on("input", async (event) => {
@@ -781,6 +904,8 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", async () => {
 		shuttingDown = true;
 		await startupPromise?.catch(() => undefined);
+		for (const batch of parentNotifications.values()) if (batch.timer) clearTimeout(batch.timer);
+		parentNotifications.clear();
 		closeActivityPanel?.();
 		closeActivityPanel = undefined;
 		activityPanel = undefined;

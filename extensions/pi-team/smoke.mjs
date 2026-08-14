@@ -78,7 +78,11 @@ async function waitForEntry(predicate, timeoutMs = 180_000) {
 	while (Date.now() - start < timeoutMs) {
 		const response = await send("get_entries");
 		const entries = response.data?.entries ?? [];
-		const startupError = [...entries].reverse().find((entry) => entry.customType === "pi-team-event" && entry.data?.kind === "error");
+		const startupError = [...entries].reverse().find((entry) =>
+			entry.customType === "pi-team-event" &&
+			entry.data?.kind === "error" &&
+			/(failed to start|recovery failed)/.test(entry.data?.content || ""),
+		);
 		if (startupError) throw new Error(startupError.data.content);
 		if (predicate(entries)) return entries;
 		await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
@@ -102,12 +106,12 @@ try {
 	const bossRecord = bossState.data.agents.find((agent) => agent.agentId === "boss-1");
 	const teamAgentDir = resolve(dirname(bossRecord.sessionPath), "../..");
 	const bossConfig = JSON.parse(readFileSync(resolve(teamAgentDir, "boss-1/instance.json"), "utf8"));
-	const lead = (await postAs(bossConfig, "/delegate", { task: "Capacity smoke lead; wait for direction.", name: "Capacity Lead" })).agent;
+	const lead = (await postAs(bossConfig, "/delegate", { task: "Capacity smoke lead; wait for direction.", reason: "Exercise the explicit maximum-capacity control path.", name: "Capacity Lead" })).agent;
 	const leadConfig = JSON.parse(readFileSync(resolve(teamAgentDir, `${lead.agentId}/instance.json`), "utf8"));
-	const workers = await Promise.all(Array.from({ length: 4 }, (_, index) => postAs(leadConfig, "/delegate", { task: `Capacity smoke worker ${index + 1}; wait for direction.` })));
+	const workers = await Promise.all(Array.from({ length: 4 }, (_, index) => postAs(leadConfig, "/delegate", { task: `Capacity smoke worker ${index + 1}; wait for direction.`, reason: `Verify concurrent Worker slot ${index + 1} remains available for complex tasks.` })));
 	if (new Set(workers.map((result) => result.agent.agentId)).size !== 4) throw new Error("Worker IDs were not unique");
 	let fifthRejected = false;
-	try { await postAs(leadConfig, "/delegate", { task: "This fifth worker must be rejected." }); }
+	try { await postAs(leadConfig, "/delegate", { task: "This fifth worker must be rejected.", reason: "Verify the hard safety ceiling still rejects a fifth concurrent Worker." }); }
 	catch (error) { fifthRejected = String(error).includes("already has 4 active children"); }
 	if (!fifthRejected) throw new Error("Fifth Worker was not rejected by the capacity limit");
 	const listed = await postAs(leadConfig, "/list", {});
