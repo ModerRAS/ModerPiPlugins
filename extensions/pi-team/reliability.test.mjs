@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BUILTIN_IDENTITIES, formatProgress, readJsonFile, readJsonLines, readModelPool, resolveModelPattern, resolveSpawnModel, sendRpcPrompt, writeJsonAtomic } from "./runtime.ts";
+import { BUILTIN_IDENTITIES, formatAgentTree, formatProgress, readJsonFile, readJsonLines, readModelPool, resolveModelPattern, resolveSpawnModel, sendRpcPrompt, writeJsonAtomic } from "./runtime.ts";
 
 test("formatProgress accepts preformatted and array progress", () => {
 	const progress = ["first update", "second update"];
@@ -11,6 +11,25 @@ test("formatProgress accepts preformatted and array progress", () => {
 
 	assert.equal(formatProgress(progress), preformatted);
 	assert.equal(formatProgress(preformatted), preformatted);
+});
+
+test("team tree shows Boss, Lead worker counts, and Workers", () => {
+	const agents = [
+		{ agentId: "boss-1", role: "boss", status: "idle", runCount: 2 },
+		{ agentId: "lead-1", parentId: "boss-1", role: "lead", status: "running", runCount: 1 },
+		{ agentId: "worker-1", parentId: "lead-1", role: "worker", status: "idle", runCount: 1 },
+		{ agentId: "worker-2", parentId: "lead-1", role: "worker", status: "running", runCount: 3 },
+		{ agentId: "lead-2", parentId: "boss-1", role: "lead", status: "idle", runCount: 0 },
+	];
+
+	assert.deepEqual(formatAgentTree(agents, "boss-1"), [
+		"> boss-1 [idle r2]",
+		"  ├─ lead-1 [running r1] (2 workers)",
+		"  │  ├─ worker-1 [idle r1]",
+		"  │  └─ worker-2 [running r3]",
+		"  └─ lead-2 [idle r0] (0 workers)",
+	]);
+	assert.equal(formatAgentTree(agents.filter((agent) => agent.agentId !== "worker-1"), "boss-1")[1], "  ├─ lead-1 [running r1] (1 worker)");
 });
 
 test("durable team state and events survive restart reads", async () => {

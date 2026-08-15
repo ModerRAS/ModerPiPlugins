@@ -75,7 +75,7 @@ Boss 默认看主管汇报，不默认吞下全部员工消息。Boss 可主动�
 
 Supervisor 为每个角色持久化独立事件游标。每次 `prompt` 或 `steer` 唤醒角色时，会自动注入该游标之后、截至本次投递快照的全部可见正式事件，然后推进游标。Boss 唤醒主管时，主管因此会拿到期间全部直属 Worker 消息和生命周期事件，不依赖模型主动调用读取工具。
 
-Worker `agent_settled` 必定产生直属主管通知。主管正在运行时用 `steer` 合入当前 loop，主管 idle 时用 `prompt` 启动新 loop；短时间内多个子角色报告会批量合并。运行中的 Worker 每 10 分钟重复产生一次巡检通知，直到 settled、cancelled 或进程退出；没有新 assistant 文本时也明确报告仍在运行。
+Worker `agent_settled` 必定产生直属主管通知。主管正在运行时用 `steer` 合入当前 loop，主管 idle 时用 `prompt` 启动新 loop；短时间内多个子角色报告会批量合并。运行中的 Worker 每 10 分钟重复产生一次巡检通知，直到 settled、被移除或进程退出；没有新 assistant 文本时也明确报告仍在运行。
 
 ## 线性上下文上的并发 Boss
 
@@ -238,7 +238,7 @@ UI 把所有正常聊天和执行细节分流：
 
 ### Agent Inspector
 
-Inspector 是不抢占主编辑器焦点的只读观察器。用户可选择任意 Boss、主管或 Worker，并查看：
+底部 Team 状态按 Boss → Lead → Worker 三层树展示，Lead 行显示直属 Worker 数量。`/cancel` 完成后，目标子树从活动 registry、持久快照、角色列表和该树中移除；角色独立 Session 与正式事件日志继续保留用于审计。选择角色后显示：
 
 - 角色运行状态。
 - 工具调用生命周期。
@@ -292,13 +292,14 @@ team_list
 
 ## 取消与迟到结果
 
-取消分为逻辑状态和物理停止：
+取消分为物理停止、活动组织移除和历史审计：
 
 1. Supervisor 先增加任务 generation 或标记当前 attempt 无效。
 2. 禁止该 attempt 的后续结果改变正式状态。
 3. 向相关 RPC Pi 发送 `abort`，并按组织关系传播给下属。
 4. 等待 `agent_settled` 或进程退出；超时后执行进程树终止。
-5. 迟到消息仍写入审计记录，但标记为 stale/superseded，默认不上正式主聊天。
+5. 从活动 registry、持久快照、角色列表和底部树移除目标角色及其后代。
+6. 保留独立 Session 和正式事件日志，且后续 `agentId` 不复用。迟到消息仍写入审计记录，但标记为 stale/superseded，默认不上正式主聊天。
 
 采用旧结果必须通过单独的 `result_adopted` 事件，不允许“最后写入者自动获胜”。
 

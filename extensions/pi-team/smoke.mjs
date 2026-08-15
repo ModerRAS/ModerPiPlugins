@@ -1,9 +1,10 @@
 import { execFileSync, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
-const cwd = resolve(import.meta.dirname, "../..");
+const cwd = mkdtempSync(join(tmpdir(), "pi-team-smoke-"));
 const extension = resolve(import.meta.dirname, "index.ts");
 const command = process.platform === "win32" ? "pi.cmd" : "pi";
 const child = spawn(command, ["--mode", "rpc", "--no-session", "--no-extensions", "-e", extension], {
@@ -155,11 +156,20 @@ try {
 	try { await postAs(leadConfig, "/delegate", { task: "This fifth worker must be rejected.", reason: "Verify the hard safety ceiling still rejects a fifth concurrent Worker." }); }
 	catch (error) { fifthRejected = String(error).includes("already has 4 active children"); }
 	if (!fifthRejected) throw new Error("Fifth Worker was not rejected by the capacity limit");
-	const listed = await postAs(leadConfig, "/list", {});
-	if (listed.agents.filter((agent) => agent.role === "worker").length !== 4) throw new Error("Lead could not list four Workers");
+	await postAs(leadConfig, "/cancel", { target: workers[0].agent.agentId });
+	let listed = await postAs(leadConfig, "/list", {});
+	if (listed.agents.some((agent) => agent.agentId === workers[0].agent.agentId) || listed.agents.filter((agent) => agent.role === "worker").length !== 3) throw new Error("Lead removal did not delete its direct Worker from the active team");
+	const replacement = (await postAs(leadConfig, "/delegate", { task: "Replacement capacity smoke worker; wait for direction.", reason: "Verify removed capacity can be reused without reusing an old agent ID." })).agent;
+	if (workers.some((worker) => worker.agent.agentId === replacement.agentId)) throw new Error("Removed Worker agent ID was reused");
+	listed = await postAs(leadConfig, "/list", {});
+	if (listed.agents.filter((agent) => agent.role === "worker").length !== 4) throw new Error("Lead could not restore four active Workers after removal");
 	await postAs(bossConfig, "/cancel", { target: lead.agentId });
+	const afterLeadRemoval = await postAs(bossConfig, "/list", {});
+	if (afterLeadRemoval.agents.some((agent) => agent.agentId === lead.agentId || agent.parentId === lead.agentId)) throw new Error("Boss removal did not delete the Lead subtree from the active team");
 	await send("prompt", { message: "/cancel boss-1" });
 	const finalEntries = await waitForEntry((items) => items.some((entry) => entry.customType === "pi-team-event" && entry.data?.kind === "control" && entry.data?.actorId === "user" && entry.data?.content.includes("boss-1")));
+	const finalState = [...finalEntries].reverse().find((entry) => entry.customType === "pi-team-state");
+	if (finalState?.data?.agents?.some((agent) => agent.agentId === "boss-1") || finalState?.data?.focusedBossId === "boss-1") throw new Error("User removal left the Boss active or focused");
 	if (!entries.some((entry) => entry.customType === "pi-team-state" && entry.data?.focusedBossId === "boss-1")) throw new Error("Focused Boss was not persisted");
 	if (events.some((event) => event.type === "non-json")) throw new Error("RPC stdout contained non-JSON output");
 	if (stderr.trim()) throw new Error(`Supervisor stderr was not empty: ${stderr.trim()}`);
@@ -170,6 +180,8 @@ try {
 		item.reject(new Error("Smoke test shutting down"));
 	}
 	pending.clear();
-	child.kill();
-	setTimeout(() => child.kill("SIGKILL"), 2000).unref();
+	if (process.platform === "win32" && child.pid) {
+		try { execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" }); } catch {}
+	} else child.kill("SIGKILL");
+	rmSync(cwd, { recursive: true, force: true });
 }

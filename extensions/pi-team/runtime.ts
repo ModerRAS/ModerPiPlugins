@@ -7,6 +7,33 @@ export interface RpcPromptRequester {
 
 export type ModelPool = Record<string, string>;
 
+type TreeAgent = {
+	agentId: string;
+	parentId?: string;
+	role: "boss" | "lead" | "worker";
+	runCount?: number;
+	status: string;
+};
+
+export function formatAgentTree(allAgents: TreeAgent[], focusedBossId?: string): string[] {
+	const children = (parentId: string, role: TreeAgent["role"]): TreeAgent[] => allAgents.filter((agent) => agent.parentId === parentId && agent.role === role);
+	const label = (agent: TreeAgent): string => `${agent.agentId} [${agent.status} r${agent.runCount ?? 0}]`;
+	const lines: string[] = [];
+	for (const boss of allAgents.filter((agent) => agent.role === "boss")) {
+		lines.push(`${boss.agentId === focusedBossId ? ">" : " "} ${label(boss)}`);
+		const leads = children(boss.agentId, "lead");
+		leads.forEach((lead, leadIndex) => {
+			const lastLead = leadIndex === leads.length - 1;
+			const workers = children(lead.agentId, "worker");
+			lines.push(`  ${lastLead ? "└─" : "├─"} ${label(lead)} (${workers.length} worker${workers.length === 1 ? "" : "s"})`);
+			workers.forEach((worker, workerIndex) => {
+				lines.push(`  ${lastLead ? "   " : "│  "}${workerIndex === workers.length - 1 ? "└─" : "├─"} ${label(worker)}`);
+			});
+		});
+	}
+	return lines;
+}
+
 export const BUILTIN_IDENTITIES = ["text-high", "text-medium", "text-low", "vision-high", "vision-medium", "vision-low"] as const;
 
 export function readModelPool(poolPath: string): ModelPool {

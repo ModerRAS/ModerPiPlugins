@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-export { BUILTIN_IDENTITIES, formatProgress, readJsonFile, readJsonLines, readModelPool, resolveModelPattern, resolveSpawnModel, sendRpcPrompt, writeJsonAtomic, type ModelPool, type RpcPromptRequester } from "./runtime.ts";
+export { BUILTIN_IDENTITIES, formatAgentTree, formatProgress, readJsonFile, readJsonLines, readModelPool, resolveModelPattern, resolveSpawnModel, sendRpcPrompt, writeJsonAtomic, type ModelPool, type RpcPromptRequester } from "./runtime.ts";
 
 export type TeamRole = "boss" | "lead" | "worker";
 export type AgentStatus = "starting" | "running" | "idle" | "recovering" | "cancelled" | "failed";
@@ -164,16 +164,18 @@ export function registerRoleExtension(pi: ExtensionAPI, expectedRole: TeamRole):
 				? [
 					"Do not implement substantive project work yourself; scope it and delegate execution to the minimum sufficient Leads.",
 					"Use one Lead for one coherent workstream and add more only for genuinely independent domains.",
+					"Call team_models before delegation. Leads normally use high: choose vision-high only for visual or GUI evidence, otherwise text-high; pass only an available identity.",
 				]
 				: [
 					"Do not implement substantive Worker tasks yourself; coordinate, review, and delegate execution.",
 					"Use one Worker for one coherent task and add more only for genuinely independent parallel work.",
+					"Call team_models before delegation. Prefer medium for ordinary work, low for simple bounded work, and high only for genuinely complex work; choose vision only for visual or GUI evidence, otherwise text.",
 				],
 			parameters: Type.Object({
 				task: Type.String({ description: "Concrete delegated task with a verifiable outcome" }),
 				reason: Type.String({ minLength: 12, description: "Why this needs a new role rather than a suitable existing subordinate" }),
 				name: Type.Optional(Type.String({ description: "Short display name" })),
-				identity: Type.Optional(Type.String({ description: "Identity from the team pool (e.g. planner, builder, git, cli, tui, gui, explorer, reviewer). Call team_models first to list configured identities." })),
+				identity: Type.Optional(Type.String({ description: "Available identity returned by team_models, normally text-high/vision-high for Leads and text-medium/vision-medium or low for Workers" })),
 			}),
 			async execute(_id, params) {
 				const result = await request<{ agent: AgentRecord }>(config, "/delegate", params);
@@ -186,12 +188,12 @@ export function registerRoleExtension(pi: ExtensionAPI, expectedRole: TeamRole):
 
 		pi.registerTool({
 			name: "team_cancel",
-			label: "Team Cancel",
-			description: "Cancel one of your subordinate agents and its descendants.",
-			parameters: Type.Object({ target: Type.String({ description: "Subordinate agent ID" }) }),
+			label: "Team Remove",
+			description: "Stop and remove one of your direct subordinate agents and its descendants from the active team.",
+			parameters: Type.Object({ target: Type.String({ description: "Direct subordinate agent ID" }) }),
 			async execute(_id, params) {
 				const result = await request<{ cancelled: string[] }>(config, "/cancel", params);
-				return { content: [{ type: "text", text: `Cancelled: ${result.cancelled.join(", ")}` }], details: result };
+				return { content: [{ type: "text", text: `Removed: ${result.cancelled.join(", ")}` }], details: result };
 			},
 		});
 	}
