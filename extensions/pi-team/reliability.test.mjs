@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BUILTIN_IDENTITIES, formatAgentTree, formatProgress, readJsonFile, readJsonLines, readModelPool, resolveModelPattern, resolveSpawnModel, sendRpcPrompt, writeJsonAtomic } from "./runtime.ts";
+import { BUILTIN_IDENTITIES, formatAgentTree, formatProgress, formatTokenUsage, readJsonFile, readJsonLines, readModelPool, resolveModelPattern, resolveSpawnModel, sendRpcPrompt, sumTokenUsage, writeJsonAtomic } from "./runtime.ts";
 
 test("formatProgress accepts preformatted and array progress", () => {
 	const progress = ["first update", "second update"];
@@ -11,6 +11,38 @@ test("formatProgress accepts preformatted and array progress", () => {
 
 	assert.equal(formatProgress(progress), preformatted);
 	assert.equal(formatProgress(preformatted), preformatted);
+});
+
+test("token usage sums assistant, toolResult, and compaction entries", () => {
+	const entries = [
+		{ type: "session", id: "hdr" },
+		{ type: "message", message: { role: "assistant", usage: { input: 1000, output: 200, cacheRead: 300, cacheWrite: 400, cost: { total: 0.01 } } } },
+		{ type: "message", message: { role: "toolResult", usage: { input: 50, output: 10, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } } } },
+		{ type: "compaction", usage: { input: 500, output: 50, cacheRead: 0, cacheWrite: 0, cost: { total: 0.002 } } },
+		{ type: "message", message: { role: "user" } },
+	];
+
+	assert.deepEqual(sumTokenUsage(entries), { input: 1550, output: 260, cacheRead: 300, cacheWrite: 400, cost: 0.013 });
+});
+
+test("token usage formats compactly for the bottom tree", () => {
+	assert.equal(formatTokenUsage({ input: 1_234_567, output: 45_000, cacheRead: 900_000, cacheWrite: 10, cost: 0.423 }), "in 1.2M out 45.0k cache 900.0k $0.423");
+	assert.equal(formatTokenUsage({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 }), "in 0 out 0 cache 0");
+	assert.equal(formatTokenUsage(), "");
+});
+
+test("team tree appends persisted token usage when present", () => {
+	const agents = [
+		{ agentId: "boss-1", model: "opencode-go/gpt-5.6-luna", role: "boss", status: "idle", runCount: 2, tokenUsage: { input: 1200, output: 300, cacheRead: 800, cacheWrite: 100, cost: 0.005 } },
+		{ agentId: "lead-1", identity: "text-high", model: "opencode-go/deepseek-v4-pro", parentId: "boss-1", role: "lead", status: "idle" },
+		{ agentId: "worker-1", identity: "text-medium", model: "opencode-go/deepseek-v4-flash", parentId: "lead-1", role: "worker", status: "idle" },
+	];
+
+	assert.deepEqual(formatAgentTree(agents, "boss-1"), [
+		"> boss-1 [inherited: opencode-go/gpt-5.6-luna] [idle r2] in 1.2k out 300 cache 900 $0.005",
+		"  └─ lead-1 [text-high: opencode-go/deepseek-v4-pro] [idle r0] (1 worker)",
+		"     └─ worker-1 [text-medium: opencode-go/deepseek-v4-flash] [idle r0]",
+	]);
 });
 
 test("team tree shows hierarchy, Worker counts, and model selections", () => {

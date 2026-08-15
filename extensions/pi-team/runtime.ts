@@ -7,6 +7,14 @@ export interface RpcPromptRequester {
 
 export type ModelPool = Record<string, string>;
 
+export interface TokenUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	cost: number;
+}
+
 type TreeAgent = {
 	agentId: string;
 	identity?: string;
@@ -15,11 +23,12 @@ type TreeAgent = {
 	role: "boss" | "lead" | "worker";
 	runCount?: number;
 	status: string;
+	tokenUsage?: TokenUsage;
 };
 
 export function formatAgentTree(allAgents: TreeAgent[], focusedBossId?: string): string[] {
 	const children = (parentId: string, role: TreeAgent["role"]): TreeAgent[] => allAgents.filter((agent) => agent.parentId === parentId && agent.role === role);
-	const label = (agent: TreeAgent): string => `${agent.agentId} [${agent.identity ?? "inherited"}: ${agent.model ?? "default"}] [${agent.status} r${agent.runCount ?? 0}]`;
+	const label = (agent: TreeAgent): string => `${agent.agentId} [${agent.identity ?? "inherited"}: ${agent.model ?? "default"}] [${agent.status} r${agent.runCount ?? 0}]${agent.tokenUsage ? ` ${formatTokenUsage(agent.tokenUsage)}` : ""}`;
 	const lines: string[] = [];
 	for (const boss of allAgents.filter((agent) => agent.role === "boss")) {
 		lines.push(`${boss.agentId === focusedBossId ? ">" : " "} ${label(boss)}`);
@@ -57,6 +66,48 @@ export function resolveSpawnModel(pool: ModelPool, identity: string | undefined,
 export function formatProgress(progress: unknown): string {
 	const items = Array.isArray(progress) ? progress : [progress];
 	return items.filter((item): item is string => typeof item === "string").join("\n\n");
+}
+
+interface UsageEntry {
+	message?: { role?: string; usage?: TokenUsage };
+	type?: string;
+	usage?: TokenUsage;
+}
+
+/** Sum session usage from assistant messages, nested toolResult LLM work, and compaction/branch summaries. */
+export function sumTokenUsage(entries: unknown[]): TokenUsage {
+	const totals: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+	for (const entry of entries as UsageEntry[]) {
+		let usage: TokenUsage | undefined;
+		if (entry.message?.role === "assistant") usage = entry.message.usage;
+		else if (entry.message?.role === "toolResult" && entry.message.usage) usage = entry.message.usage;
+		else if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage) usage = entry.usage;
+		if (!usage) continue;
+		totals.input += usage.input ?? 0;
+		totals.output += usage.output ?? 0;
+		totals.cacheRead += usage.cacheRead ?? 0;
+		totals.cacheWrite += usage.cacheWrite ?? 0;
+		totals.cost += usage.cost?.total ?? 0;
+	}
+	return totals;
+}
+
+export function formatTokenUsage(usage?: TokenUsage): string {
+	if (!usage) return "";
+	const count = (value: number): string => {
+		if (!Number.isFinite(value) || value <= 0) return "0";
+		if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+		if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+		return String(value);
+	};
+	const cost = (value: number): string => {
+		if (!Number.isFinite(value) || value <= 0) return "$0";
+		const fixed = value >= 100 ? value.toFixed(0) : value >= 1 ? value.toFixed(2) : value >= 0.01 ? value.toFixed(4) : value.toFixed(6);
+		return `$${fixed.replace(/\.?0+$/, "")}`;
+	};
+	const parts = [`in ${count(usage.input)}`, `out ${count(usage.output)}`, `cache ${count((usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0))}`];
+	if ((usage.cost ?? 0) > 0) parts.push(cost(usage.cost));
+	return parts.join(" ");
 }
 
 export function readJsonFile<T>(path: string): T | undefined {

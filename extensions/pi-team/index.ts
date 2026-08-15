@@ -15,6 +15,7 @@ import {
 	TEAM_INSTANCE_FLAG,
 	TEAM_STATE_ENTRY,
 	formatAgentTree,
+	formatTokenUsage,
 	getMessageText,
 	readInstanceConfig,
 	readJsonFile,
@@ -23,6 +24,7 @@ import {
 	registerRoleExtension,
 	resolveSpawnModel,
 	sendRpcPrompt,
+	sumTokenUsage,
 	writeJsonAtomic,
 	type AgentRecord,
 	type AgentStatus,
@@ -150,10 +152,14 @@ class RpcClient {
 			else pending.reject(new Error(event.error || `RPC ${event.command} failed`));
 			return;
 		}
-		this.onEvent(event);
+		try {
+			this.onEvent(event);
+		} catch (error) {
+			this.onProtocolError(`event handler error: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
-	request(command: Record<string, unknown>, timeoutMs = 15_000): Promise<RpcResponse> {
+	request(command: Record<string, unknown>, timeoutMs = 60_000): Promise<RpcResponse> {
 		const id = `team-${this.nextId++}`;
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
@@ -202,10 +208,12 @@ export class TeamActivityPanel {
 		};
 		const inspected = this.getInspectedAgent();
 		if (inspected) {
+			const usageLine = inspected.tokenUsage ? formatTokenUsage(inspected.tokenUsage) : "";
 			const lines = [
 				`INSPECT ${pathOf(inspected.agentId)}`,
 				`[${inspected.identity ?? "inherited"}: ${inspected.model ?? "default"}]`,
 				`[${inspected.role}/${inspected.status} r${inspected.runCount ?? 0}]`,
+				...(usageLine ? [usageLine] : []),
 				"",
 				...inspected.details.slice(-30),
 			];
@@ -648,6 +656,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 				if (agent.progressTimer) clearTimeout(agent.progressTimer);
 				agent.progressTimer = undefined;
 				addDetail(agent, "agent settled");
+				refreshTokenUsage(agent);
 				persistState();
 				const hadReport = agent.pendingParentMessages.length > 0;
 				agent.pendingParentMessages.length = 0;
@@ -686,6 +695,11 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		updateUi();
 	}
 
+	function refreshTokenUsage(agent: RuntimeAgent): void {
+		if (!agent.sessionPath || !existsSync(agent.sessionPath)) return;
+		agent.tokenUsage = sumTokenUsage(readJsonLines(agent.sessionPath));
+	}
+
 	function ensureNativeRoleSession(sessionPath: string): string {
 		const nativeSessionDir = resolve(SessionManager.create(context!.cwd).getSessionDir());
 		if (resolve(dirname(sessionPath)).toLowerCase() === nativeSessionDir.toLowerCase()) return sessionPath;
@@ -694,7 +708,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 
 	async function waitForReady(agent: RuntimeAgent): Promise<void> {
 		let lastError: unknown;
-		for (let attempt = 0; attempt < 30; attempt++) {
+		for (let attempt = 0; attempt < 60; attempt++) {
 			try {
 				const response = await agent.rpc!.request({ type: "get_state" }, 1000);
 				agent.sessionPath = response.data?.sessionFile || agent.sessionPath;
@@ -702,7 +716,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 				return;
 			} catch (error) {
 				lastError = error;
-				await new Promise((resolve) => setTimeout(resolve, 100));
+				await new Promise((resolve) => setTimeout(resolve, 250));
 			}
 		}
 		throw lastError instanceof Error ? lastError : new Error("RPC child did not become ready");

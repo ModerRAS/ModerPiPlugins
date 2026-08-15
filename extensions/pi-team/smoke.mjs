@@ -135,6 +135,10 @@ try {
 	if (recoveredBoss?.sessionPath !== firstBossRecord.sessionPath) throw new Error("Boss recovery did not continue the same native Pi session");
 	await send("prompt", { message: "/to boss-1 Reply with exactly BOSS_SMOKE_TWO and no other text." });
 	const entries = await waitForEntry((items) => items.some((entry) => entry.customType === "pi-team-event" && entry.data?.actorId === "boss-1" && entry.data?.content.includes("BOSS_SMOKE_TWO")));
+	const usageState = await waitForEntry((items) => items.some((entry) => entry.customType === "pi-team-state" && entry.data?.agents?.some((agent) => agent.agentId === "boss-1" && agent.tokenUsage && agent.tokenUsage.output > 0)));
+	const usageBoss = [...usageState].reverse().find((entry) => entry.customType === "pi-team-state")?.data?.agents?.find((agent) => agent.agentId === "boss-1");
+	if (!usageBoss?.tokenUsage?.input) throw new Error("Boss token usage was not collected from its session");
+	if (usageBoss.tokenUsage.input <= 0 || usageBoss.tokenUsage.output <= 0) throw new Error("Boss token usage was not persisted from its session");
 	const latest = JSON.parse(readFileSync(join(cwd, ".pi", "pi-team", "latest.json"), "utf8"));
 	teamAgentDir = join(cwd, ".pi", "pi-team", latest.storageId, "agents");
 	const bossConfig = JSON.parse(readFileSync(resolve(teamAgentDir, "boss-1/instance.json"), "utf8"));
