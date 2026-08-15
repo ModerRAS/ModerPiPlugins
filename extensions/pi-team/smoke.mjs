@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -19,6 +19,8 @@ let stderr = "";
 let nextId = 1;
 const events = [];
 const pending = new Map();
+let nativeSessionDir;
+let teamAgentDir;
 
 function send(type, fields = {}) {
 	const id = `smoke-${nextId++}`;
@@ -58,7 +60,7 @@ child.stdout.on("data", (chunk) => {
 });
 child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
 
-async function postAs(config, path, body) {
+async function postAs(config, path, body, retries = 50) {
 	const response = await fetch(`${config.serverUrl}${path}`, {
 		method: "POST",
 		headers: {
@@ -70,7 +72,19 @@ async function postAs(config, path, body) {
 		body: JSON.stringify(body),
 	});
 	const payload = await response.json();
-	if (!response.ok) throw new Error(payload.error || `${path} failed`);
+	if (response.status === 401 && retries > 0 && teamAgentDir) {
+		await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+		Object.assign(config, JSON.parse(readFileSync(join(teamAgentDir, config.agentId, "instance.json"), "utf8")));
+		return postAs(config, path, body, retries - 1);
+	}
+	if (!response.ok) {
+		const entryResponse = await send("get_entries").catch(() => undefined);
+		const recentErrors = (entryResponse?.data?.entries ?? [])
+			.filter((entry) => entry.customType === "pi-team-event" && entry.data?.kind === "error")
+			.slice(-8)
+			.map((entry) => entry.data.content);
+		throw new Error(`${path} as ${config.agentId} with ${JSON.stringify(body)} failed: ${payload.error || response.status}; recent errors: ${JSON.stringify(recentErrors)}`);
+	}
 	return payload;
 }
 
@@ -106,16 +120,23 @@ try {
 	await send("prompt", { message: "/boss Reply with exactly BOSS_SMOKE_ONE and no other text." });
 	const firstEntries = await waitForEntry((entries) => entries.some((entry) => entry.customType === "pi-team-event" && entry.data?.actorId === "boss-1" && entry.data?.content.includes("BOSS_SMOKE_ONE")));
 	const firstBossState = [...firstEntries].reverse().find((entry) => entry.customType === "pi-team-state" && entry.data?.agents?.some((agent) => agent.agentId === "boss-1" && agent.pid));
-	const firstBossPid = firstBossState?.data?.agents?.find((agent) => agent.agentId === "boss-1")?.pid;
+	const firstBossRecord = firstBossState?.data?.agents?.find((agent) => agent.agentId === "boss-1");
+	const firstBossPid = firstBossRecord?.pid;
+	const supervisorSessionPath = firstBossState?.data?.supervisorSessionPath;
 	if (!firstBossPid) throw new Error("Initial Boss PID was not persisted");
+	if (!firstBossRecord.sessionPath || !existsSync(firstBossRecord.sessionPath)) throw new Error("Boss did not create a native Pi session");
+	if (!supervisorSessionPath || !existsSync(supervisorSessionPath)) throw new Error("Supervisor did not create a native Pi session anchor");
+	nativeSessionDir = dirname(supervisorSessionPath);
+	if (dirname(firstBossRecord.sessionPath).toLowerCase() !== nativeSessionDir.toLowerCase()) throw new Error("Boss session was not stored in Pi's native project session directory");
 	if (process.platform === "win32") execFileSync("taskkill", ["/PID", String(firstBossPid), "/F"], { stdio: "ignore" });
 	else process.kill(firstBossPid, "SIGKILL");
-	await waitForEntry((entries) => entries.some((entry) => entry.customType === "pi-team-state" && entry.data?.agents?.some((agent) => agent.agentId === "boss-1" && agent.pid && agent.pid !== firstBossPid && agent.status === "idle")));
+	const recoveredEntries = await waitForEntry((entries) => entries.some((entry) => entry.customType === "pi-team-state" && entry.data?.agents?.some((agent) => agent.agentId === "boss-1" && agent.pid && agent.pid !== firstBossPid && agent.status === "idle")));
+	const recoveredBoss = [...recoveredEntries].reverse().find((entry) => entry.customType === "pi-team-state")?.data?.agents?.find((agent) => agent.agentId === "boss-1");
+	if (recoveredBoss?.sessionPath !== firstBossRecord.sessionPath) throw new Error("Boss recovery did not continue the same native Pi session");
 	await send("prompt", { message: "/to boss-1 Reply with exactly BOSS_SMOKE_TWO and no other text." });
 	const entries = await waitForEntry((items) => items.some((entry) => entry.customType === "pi-team-event" && entry.data?.actorId === "boss-1" && entry.data?.content.includes("BOSS_SMOKE_TWO")));
-	const bossState = [...entries].reverse().find((entry) => entry.customType === "pi-team-state" && entry.data?.agents?.some((agent) => agent.agentId === "boss-1"));
-	const bossRecord = bossState.data.agents.find((agent) => agent.agentId === "boss-1");
-	const teamAgentDir = resolve(dirname(bossRecord.sessionPath), "../..");
+	const latest = JSON.parse(readFileSync(join(cwd, ".pi", "pi-team", "latest.json"), "utf8"));
+	teamAgentDir = join(cwd, ".pi", "pi-team", latest.storageId, "agents");
 	const bossConfig = JSON.parse(readFileSync(resolve(teamAgentDir, "boss-1/instance.json"), "utf8"));
 	const lead = (await postAs(bossConfig, "/delegate", { task: "Capacity smoke lead; wait for direction.", reason: "Exercise the explicit maximum-capacity control path.", name: "Capacity Lead" })).agent;
 	const leadConfig = JSON.parse(readFileSync(resolve(teamAgentDir, `${lead.agentId}/instance.json`), "utf8"));
@@ -144,7 +165,7 @@ try {
 	await expectRejected(() => postAs(workerConfigs[0], "/send", { target: workers[0].agent.agentId, message: "self must fail" }), "may only message another role in the same Pi Team");
 	await expectRejected(() => postAs(workerConfigs[0], "/send", { target: "@missing-worker", message: "unknown must fail" }), "Unknown target");
 	await expectRejected(() => postAs(workerConfigs[0], "/send", { target: "@Capacity Lead", message: "ambiguous must fail" }), "Ambiguous target name");
-	await expectRejected(() => postAs({ ...workerConfigs[0], actorEpoch: "foreign-team-epoch", token: "foreign-team-token" }, "/send", { target: crossWorker.agentId, message: "cross-team must fail" }), "Unauthorized");
+	await expectRejected(() => postAs({ ...workerConfigs[0], actorEpoch: "foreign-team-epoch", token: "foreign-team-token" }, "/send", { target: crossWorker.agentId, message: "cross-team must fail" }, 0), "Unauthorized");
 	await expectRejected(() => postAs(workerConfigs[0], "/delegate", { task: "must fail", reason: "Workers still cannot delegate team roles." }), "Workers cannot delegate");
 	await expectRejected(() => postAs(leadConfig, "/cancel", { target: crossWorker.agentId }), "may only cancel direct subordinates");
 
@@ -184,4 +205,5 @@ try {
 		try { execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" }); } catch {}
 	} else child.kill("SIGKILL");
 	rmSync(cwd, { recursive: true, force: true });
+	if (nativeSessionDir) rmSync(nativeSessionDir, { recursive: true, force: true });
 }

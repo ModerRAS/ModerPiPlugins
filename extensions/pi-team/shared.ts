@@ -37,6 +37,7 @@ export interface AgentRecord {
 	departmentId?: string;
 	identity?: string;
 	lastContextSeq?: number;
+	model?: string;
 	name: string;
 	parentId?: string;
 	path?: string;

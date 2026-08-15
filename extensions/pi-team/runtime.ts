@@ -9,6 +9,8 @@ export type ModelPool = Record<string, string>;
 
 type TreeAgent = {
 	agentId: string;
+	identity?: string;
+	model?: string;
 	parentId?: string;
 	role: "boss" | "lead" | "worker";
 	runCount?: number;
@@ -17,7 +19,7 @@ type TreeAgent = {
 
 export function formatAgentTree(allAgents: TreeAgent[], focusedBossId?: string): string[] {
 	const children = (parentId: string, role: TreeAgent["role"]): TreeAgent[] => allAgents.filter((agent) => agent.parentId === parentId && agent.role === role);
-	const label = (agent: TreeAgent): string => `${agent.agentId} [${agent.status} r${agent.runCount ?? 0}]`;
+	const label = (agent: TreeAgent): string => `${agent.agentId} [${agent.identity ?? "inherited"}: ${agent.model ?? "default"}] [${agent.status} r${agent.runCount ?? 0}]`;
 	const lines: string[] = [];
 	for (const boss of allAgents.filter((agent) => agent.role === "boss")) {
 		lines.push(`${boss.agentId === focusedBossId ? ">" : " "} ${label(boss)}`);

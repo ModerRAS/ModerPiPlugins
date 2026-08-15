@@ -13,23 +13,23 @@ test("formatProgress accepts preformatted and array progress", () => {
 	assert.equal(formatProgress(preformatted), preformatted);
 });
 
-test("team tree shows Boss, Lead worker counts, and Workers", () => {
+test("team tree shows hierarchy, Worker counts, and model selections", () => {
 	const agents = [
-		{ agentId: "boss-1", role: "boss", status: "idle", runCount: 2 },
-		{ agentId: "lead-1", parentId: "boss-1", role: "lead", status: "running", runCount: 1 },
-		{ agentId: "worker-1", parentId: "lead-1", role: "worker", status: "idle", runCount: 1 },
-		{ agentId: "worker-2", parentId: "lead-1", role: "worker", status: "running", runCount: 3 },
-		{ agentId: "lead-2", parentId: "boss-1", role: "lead", status: "idle", runCount: 0 },
+		{ agentId: "boss-1", model: "opencode-go/gpt-5.6-luna", role: "boss", status: "idle", runCount: 2 },
+		{ agentId: "lead-1", identity: "text-high", model: "opencode-go/deepseek-v4-pro", parentId: "boss-1", role: "lead", status: "running", runCount: 1 },
+		{ agentId: "worker-1", identity: "text-medium", model: "opencode-go/deepseek-v4-flash", parentId: "lead-1", role: "worker", status: "idle", runCount: 1 },
+		{ agentId: "worker-2", identity: "vision-low", model: "opencode-go/mimo-v2.5", parentId: "lead-1", role: "worker", status: "running", runCount: 3 },
+		{ agentId: "lead-2", identity: "vision-high", model: "opencode-go/gpt-5.6-luna", parentId: "boss-1", role: "lead", status: "idle", runCount: 0 },
 	];
 
 	assert.deepEqual(formatAgentTree(agents, "boss-1"), [
-		"> boss-1 [idle r2]",
-		"  ├─ lead-1 [running r1] (2 workers)",
-		"  │  ├─ worker-1 [idle r1]",
-		"  │  └─ worker-2 [running r3]",
-		"  └─ lead-2 [idle r0] (0 workers)",
+		"> boss-1 [inherited: opencode-go/gpt-5.6-luna] [idle r2]",
+		"  ├─ lead-1 [text-high: opencode-go/deepseek-v4-pro] [running r1] (2 workers)",
+		"  │  ├─ worker-1 [text-medium: opencode-go/deepseek-v4-flash] [idle r1]",
+		"  │  └─ worker-2 [vision-low: opencode-go/mimo-v2.5] [running r3]",
+		"  └─ lead-2 [vision-high: opencode-go/gpt-5.6-luna] [idle r0] (0 workers)",
 	]);
-	assert.equal(formatAgentTree(agents.filter((agent) => agent.agentId !== "worker-1"), "boss-1")[1], "  ├─ lead-1 [running r1] (1 worker)");
+	assert.equal(formatAgentTree(agents.filter((agent) => agent.agentId !== "worker-1"), "boss-1")[1], "  ├─ lead-1 [text-high: opencode-go/deepseek-v4-pro] [running r1] (1 worker)");
 });
 
 test("durable team state and events survive restart reads", async () => {

@@ -107,7 +107,7 @@ E5 用户继续补充
 
 ## 独立 Pi RPC Session
 
-Boss、部门主管和 Worker 都是独立的持久 Pi Session，建议首版使用独立的 `pi --mode rpc` 子进程。
+Boss、部门主管和 Worker 都是独立的持久 Pi Session，使用当前项目的 Pi 默认 Session 目录并以 `Pi Team <agent-id>: ...` 命名，因此可由原生 `/resume` 搜索。旧版自定义目录中的角色 Session 在首次恢复时迁移到原生目录；进程崩溃和 Team 恢复直接续写同一个 Session 文件，不为每次恢复复制新文件。Supervisor 在宿主 `--no-session` 时创建的原生锚点路径随 Team 快照持久化，后续恢复打开同一个锚点。
 
 每个角色必须拥有：
 
@@ -314,6 +314,8 @@ team_list
 ### 2. 模型上下文压缩与群聊留存
 
 各角色的 Pi Session 正常使用 Pi 原生上下文压缩。完整大群历史不必全部留在每个模型 context window 中，但始终保存在 Team 日志中供用户查看，也允许角色主动回查。因此这里不再需要独立设计一套新的上下文压缩算法。
+
+上下文缓存遵循追加式前缀：角色 system prompt、工具集合和既有 Session 历史在同一角色内保持稳定，事件游标只把新正式事件附加到最新 user message，Supervisor 的 `custom` 状态 entry 不进入模型上下文。消息正文只在 `Formal Team events` 注入一次，wake signal 不再重复 Worker report 或定向消息正文。首次 Agent 请求、不同模型档位与角色工具集合、供应商缓存 TTL，以及每轮新增的大段 Worker 输出仍会降低全 Team 汇总命中率，但插件不会主动改写既有前缀。
 
 ### 3. 旧 Boss 的停止由用户控制
 
