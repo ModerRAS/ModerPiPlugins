@@ -73,7 +73,8 @@ Boss 使用 `team_delegate` 创建 Lead，Lead 使用同一工具创建 Worker�
 - 每次角色被唤醒，Supervisor 自动注入该角色上次事件游标之后、截至本次唤醒的全部可见正式事件。Lead 因此无需主动轮询也能拿到期间所有直属 Worker 消息；游标随 Team 状态持久化。
 - 底部 Team 面板按 Boss → Lead → Worker 三层树显示，Lead 行直接标出直属 Worker 数量；每个角色同时显示所选档位和实际模型，例如 `[text-medium: opencode-go/deepseek-v4-flash]`，未指定档位时显示 `[inherited: provider/model]`；被移除角色不再占用面板。
 - 运行中的 Worker 每 10 分钟触发一次 Lead 巡检并继续重复，直到 Worker settled、被移除或退出。即使区间内没有新 assistant 文本，也会明确报告仍在运行。
-- 每个角色在其 Session 文件中的 token 用量（输入、输出、缓存读写、费用）在 settled 时统计，并随 Team 状态持久化；底部树和 Inspector 显示为 `in 1.2M out 340k cache 900k $0.42`，恢复后沿用累计值。
+- 每个角色在其 Session 文件中的 token 用量（输入、输出、缓存读写、费用）随每次 LLM 调用实时统计（`message_end` 事件），并在 settled 时与 Session 文件对账；随 Team 状态持久化。底部树和 Inspector 显示为 `in 1.2M out 340k cache 900k $0.42`，恢复后沿用累计值。
+- 面板最底部单独一行按六档 identity（text/vision × high/medium/low）累计整个会话的模型开销，实时更新且不随角色移除而消失。
 - 侧栏和 `/agents` 的 `rN` 是持久化 `runCount`，只按真实 RPC `agent_start` 递增，用于区分一轮内的多条 assistant 消息与多次 agent loop。
 - 委派数量按任务动态决定；4 是安全上限而不是目标。新角色必须有具体的独立工作理由，并优先复用现有合适角色。
 - Supervisor IPC 只监听 loopback，并验证 `agentId + actorEpoch + instanceToken`。每个 Supervisor 只维护自己的 Team registry；跨 Team 请求无法通过实例认证，已认证请求也只能解析本 registry 内的目标。

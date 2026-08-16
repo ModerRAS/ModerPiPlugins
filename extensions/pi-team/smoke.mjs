@@ -79,11 +79,11 @@ async function postAs(config, path, body, retries = 50) {
 	}
 	if (!response.ok) {
 		const entryResponse = await send("get_entries").catch(() => undefined);
-		const recentErrors = (entryResponse?.data?.entries ?? [])
-			.filter((entry) => entry.customType === "pi-team-event" && entry.data?.kind === "error")
-			.slice(-8)
-			.map((entry) => entry.data.content);
-		throw new Error(`${path} as ${config.agentId} with ${JSON.stringify(body)} failed: ${payload.error || response.status}; recent errors: ${JSON.stringify(recentErrors)}`);
+		const recentEvents = (entryResponse?.data?.entries ?? [])
+			.filter((entry) => entry.customType === "pi-team-event")
+			.slice(-15)
+			.map((entry) => `#${entry.data?.seq} ${entry.data?.actorId} [${entry.data?.kind}]: ${String(entry.data?.content).slice(0, 90)}`);
+		throw new Error(`${path} as ${config.agentId} with ${JSON.stringify(body)} failed: ${payload.error || response.status}; recent events: ${JSON.stringify(recentEvents)}`);
 	}
 	return payload;
 }
@@ -139,6 +139,9 @@ try {
 	const usageBoss = [...usageState].reverse().find((entry) => entry.customType === "pi-team-state")?.data?.agents?.find((agent) => agent.agentId === "boss-1");
 	if (!usageBoss?.tokenUsage?.input) throw new Error("Boss token usage was not collected from its session");
 	if (usageBoss.tokenUsage.input <= 0 || usageBoss.tokenUsage.output <= 0) throw new Error("Boss token usage was not persisted from its session");
+	const firstUsageEntry = [...usageState].findIndex((entry) => entry.customType === "pi-team-state" && entry.data?.agents?.some((agent) => agent.agentId === "boss-1" && agent.tokenUsage?.output > 0));
+	const firstSettledEntry = [...usageState].findIndex((entry) => entry.customType === "pi-team-event" && entry.data?.actorId === "supervisor" && entry.data?.content.includes("settled and is idle"));
+	if (firstUsageEntry === -1 || firstSettledEntry === -1 || firstUsageEntry > firstSettledEntry) throw new Error("Boss token usage was not tracked in real time before settle");
 	const latest = JSON.parse(readFileSync(join(cwd, ".pi", "pi-team", "latest.json"), "utf8"));
 	teamAgentDir = join(cwd, ".pi", "pi-team", latest.storageId, "agents");
 	const bossConfig = JSON.parse(readFileSync(resolve(teamAgentDir, "boss-1/instance.json"), "utf8"));
@@ -195,6 +198,7 @@ try {
 	const finalEntries = await waitForEntry((items) => items.some((entry) => entry.customType === "pi-team-event" && entry.data?.kind === "control" && entry.data?.actorId === "user" && entry.data?.content.includes("boss-1")));
 	const finalState = [...finalEntries].reverse().find((entry) => entry.customType === "pi-team-state");
 	if (finalState?.data?.agents?.some((agent) => agent.agentId === "boss-1") || finalState?.data?.focusedBossId === "boss-1") throw new Error("User removal left the Boss active or focused");
+	if (!finalState?.data?.identityUsage || Object.values(finalState.data.identityUsage).every((usage) => !usage.input && !usage.output)) throw new Error("Session-wide identity usage was not persisted after removals");
 	if (!entries.some((entry) => entry.customType === "pi-team-state" && entry.data?.focusedBossId === "boss-1")) throw new Error("Focused Boss was not persisted");
 	if (events.some((event) => event.type === "non-json")) throw new Error("RPC stdout contained non-JSON output");
 	if (stderr.trim()) throw new Error(`Supervisor stderr was not empty: ${stderr.trim()}`);

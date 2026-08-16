@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-export { BUILTIN_IDENTITIES, formatAgentTree, formatProgress, formatTokenUsage, readJsonFile, readJsonLines, readModelPool, resolveModelPattern, resolveSpawnModel, sendRpcPrompt, sumTokenUsage, writeJsonAtomic, type ModelPool, type RpcPromptRequester, type TokenUsage } from "./runtime.ts";
+export { BUILTIN_IDENTITIES, formatAgentTree, formatIdentityUsageLine, formatProgress, formatTokenUsage, readJsonFile, readJsonLines, readModelPool, resolveModelPattern, resolveSpawnModel, sendRpcPrompt, sumTokenUsage, writeJsonAtomic, type ModelPool, type RpcPromptRequester, type TokenUsage } from "./runtime.ts";
 
 export type TeamRole = "boss" | "lead" | "worker";
 export type AgentStatus = "starting" | "running" | "idle" | "recovering" | "cancelled" | "failed";

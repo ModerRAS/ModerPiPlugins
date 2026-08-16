@@ -93,8 +93,7 @@ export function sumTokenUsage(entries: unknown[]): TokenUsage {
 }
 
 export function formatTokenUsage(usage?: TokenUsage): string {
-	if (!usage) return "";
-	const count = (value: number): string => {
+	if (!usage) return "";	const count = (value: number): string => {
 		if (!Number.isFinite(value) || value <= 0) return "0";
 		if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
 		if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
@@ -108,6 +107,18 @@ export function formatTokenUsage(usage?: TokenUsage): string {
 	const parts = [`in ${count(usage.input)}`, `out ${count(usage.output)}`, `cache ${count((usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0))}`];
 	if ((usage.cost ?? 0) > 0) parts.push(cost(usage.cost));
 	return parts.join(" ");
+}
+
+/** Session-wide per-identity totals: all six built-in tiers in fixed order, plus any custom identities. */
+export function formatIdentityUsageLine(usageByIdentity: Record<string, TokenUsage> | undefined): string {
+	if (!usageByIdentity) return "";
+	const others = Object.keys(usageByIdentity).filter((key) => !(BUILTIN_IDENTITIES as readonly string[]).includes(key)).sort();
+	return [...BUILTIN_IDENTITIES, ...others]
+		.map((identity) => {
+			const usage = usageByIdentity[identity];
+			return usage ? `${identity} ${formatTokenUsage(usage)}` : `${identity} 0`;
+		})
+		.join(" | ");
 }
 
 export function readJsonFile<T>(path: string): T | undefined {

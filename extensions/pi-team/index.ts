@@ -15,6 +15,7 @@ import {
 	TEAM_INSTANCE_FLAG,
 	TEAM_STATE_ENTRY,
 	formatAgentTree,
+	formatIdentityUsageLine,
 	formatTokenUsage,
 	getMessageText,
 	readInstanceConfig,
@@ -47,6 +48,7 @@ const ROLE_PROMPTS: Record<TeamRole, string> = {
 };
 
 interface PersistedState extends TeamSnapshot {
+	identityUsage?: Record<string, TokenUsage>;
 	nextAgentIndexes?: Record<TeamRole, number>;
 	supervisorSessionPath?: string;
 	version: 1;
@@ -186,6 +188,7 @@ export class TeamActivityPanel {
 		private getAgents: () => RuntimeAgent[],
 		private getFocusedBoss: () => string | undefined,
 		private getInspectedAgent: () => RuntimeAgent | undefined,
+		private getIdentityUsage: () => Record<string, TokenUsage>,
 	) {}
 
 	render(width: number): string[] {
@@ -224,7 +227,8 @@ export class TeamActivityPanel {
 			];
 		}
 		const agentLines = formatAgentTree(allAgents, this.getFocusedBoss());
-		const lines = ["PI TEAM", ...(agentLines.length ? agentLines : ["No active agents"])];
+		const usageLine = formatIdentityUsageLine(this.getIdentityUsage());
+		const lines = ["PI TEAM", ...(agentLines.length ? agentLines : ["No active agents"]), ...(usageLine ? [usageLine] : [])];
 		return [
 			`┌${"─".repeat(inner)}┐`,
 			...lines.map(frameLine),
@@ -266,6 +270,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	let eventsPath = "";
 	let teamSessionMirror: SessionManager | undefined;
 	let supervisorSessionPath: string | undefined;
+	let identityUsage: Record<string, TokenUsage> = {};
 	let modelPool: ModelPool = {};
 	let nextAgentIndexes: Record<TeamRole, number> = { boss: 1, lead: 1, worker: 1 };
 	let inspectedAgentId: string | undefined;
@@ -301,7 +306,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 	}
 
 	function snapshot(): PersistedState {
-		return { version: 1, teamId, focusedBossId, nextAgentIndexes: { ...nextAgentIndexes }, supervisorSessionPath, agents: [...agents.values()].map(publicAgent) };
+		return { version: 1, teamId, focusedBossId, nextAgentIndexes: { ...nextAgentIndexes }, supervisorSessionPath, identityUsage: { ...identityUsage }, agents: [...agents.values()].map(publicAgent) };
 	}
 
 	function reserveAgentId(agentId: string): void {
@@ -389,6 +394,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 						() => [...agents.values()],
 						() => focusedBossId,
 						() => inspectedAgentId ? agents.get(inspectedAgentId) : undefined,
+						() => identityUsage,
 					);
 					return activityPanel;
 				}, { placement: "belowEditor" });
@@ -398,7 +404,9 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		const lines = formatAgentTree(list, focusedBossId);
-		context.ui.setWidget(TEAM_WIDGET_KEY, lines.length ? lines : ["Pi Team: /boss <task> to start"], { placement: "belowEditor" });
+		const usageLine = formatIdentityUsageLine(identityUsage);
+		const widgetLines = [...lines, ...(usageLine ? [usageLine] : [])];
+		context.ui.setWidget(TEAM_WIDGET_KEY, widgetLines.length ? widgetLines : ["Pi Team: /boss <task> to start"], { placement: "belowEditor" });
 	}
 
 	function readStandaloneState(directory: string): PersistedState | undefined {
@@ -461,6 +469,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		context = ctx;
 		teamSessionMirror = undefined;
 		supervisorSessionPath = undefined;
+		identityUsage = {};
 		for (const batch of parentNotifications.values()) if (batch.timer) clearTimeout(batch.timer);
 		parentNotifications.clear();
 		agents.clear();
@@ -519,6 +528,7 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			teamId = reason === "fork" ? randomUUID() : saved.teamId;
 			focusedBossId = saved.focusedBossId;
 			supervisorSessionPath = reason === "fork" ? undefined : saved.supervisorSessionPath;
+			identityUsage = saved.identityUsage ?? {};
 			for (const record of saved.agents) {
 				reserveAgentId(record.agentId);
 				if (record.status === "cancelled") continue;
@@ -672,6 +682,10 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			}
 			case "message_end":
 				if (event.message?.role === "assistant") void publishAssistantText(agent, getMessageText(event.message));
+				if (event.message?.usage) {
+					addTokenUsage(agent, event.message.usage);
+					persistState();
+				}
 				break;
 			case "tool_execution_start":
 				addDetail(agent, `tool ${event.toolName} started`);
@@ -697,7 +711,48 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 
 	function refreshTokenUsage(agent: RuntimeAgent): void {
 		if (!agent.sessionPath || !existsSync(agent.sessionPath)) return;
-		agent.tokenUsage = sumTokenUsage(readJsonLines(agent.sessionPath));
+		const fileTotal = sumTokenUsage(readJsonLines(agent.sessionPath));
+		const current = agent.tokenUsage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		const delta: TokenUsage = {
+			input: Math.max(0, fileTotal.input - current.input),
+			output: Math.max(0, fileTotal.output - current.output),
+			cacheRead: Math.max(0, fileTotal.cacheRead - current.cacheRead),
+			cacheWrite: Math.max(0, fileTotal.cacheWrite - current.cacheWrite),
+			cost: Math.max(0, fileTotal.cost - current.cost),
+		};
+		if (delta.input || delta.output || delta.cacheRead || delta.cacheWrite || delta.cost) addIdentityUsage(agent, delta);
+		agent.tokenUsage = fileTotal;
+	}
+
+	function addTokenUsage(agent: RuntimeAgent, usage: TokenUsage): void {
+		const current = agent.tokenUsage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		const delta: TokenUsage = {
+			input: usage.input ?? 0,
+			output: usage.output ?? 0,
+			cacheRead: usage.cacheRead ?? 0,
+			cacheWrite: usage.cacheWrite ?? 0,
+			cost: usage.cost?.total ?? 0,
+		};
+		agent.tokenUsage = {
+			input: current.input + delta.input,
+			output: current.output + delta.output,
+			cacheRead: current.cacheRead + delta.cacheRead,
+			cacheWrite: current.cacheWrite + delta.cacheWrite,
+			cost: current.cost + delta.cost,
+		};
+		addIdentityUsage(agent, delta);
+	}
+
+	function addIdentityUsage(agent: RuntimeAgent, usage: TokenUsage): void {
+		const identity = agent.identity ?? "inherited";
+		const current = identityUsage[identity] ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+		identityUsage[identity] = {
+			input: current.input + usage.input,
+			output: current.output + usage.output,
+			cacheRead: current.cacheRead + usage.cacheRead,
+			cacheWrite: current.cacheWrite + usage.cacheWrite,
+			cost: current.cost + usage.cost,
+		};
 	}
 
 	function ensureNativeRoleSession(sessionPath: string): string {
@@ -775,9 +830,10 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 			addDetail(agent, `process exited code=${code} signal=${signal}`);
 			const unexpected = !shuttingDown && !agent.intentionalStop && agent.status !== "cancelled";
 			if (unexpected) {
+				const stderrSnippet = agent.details.filter((detail) => detail.includes("stderr:")).slice(-2).join(" | ");
 				appendEvent({
 					actorId: "supervisor",
-					content: `${agentPath(agent.agentId)} crashed and is recovering (code=${code}, signal=${signal})`,
+					content: `${agentPath(agent.agentId)} crashed and is recovering (code=${code}, signal=${signal})${stderrSnippet ? `; ${truncate(stderrSnippet, 240)}` : ""}`,
 					departmentId: agent.departmentId,
 					kind: "error",
 					targetIds: agent.parentId ? [agent.parentId] : [],
@@ -933,7 +989,12 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 
 	async function handleIpc(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const actor = authorized(req);
-		if (!actor) return json(res, 401, { error: "Unauthorized" });
+		if (!actor) {
+			const expected = agents.get(String(req.headers["x-pi-team-actor"] || ""));
+			return json(res, 401, {
+				error: `Unauthorized; expected epoch=${expected?.actorEpoch?.slice(0, 8) ?? "?"} token=${expected?.token?.slice(0, 8) ?? "?"} status=${expected?.status}`,
+			});
+		}
 		try {
 			const data = await body(req);
 			if (req.url === "/delegate") {
