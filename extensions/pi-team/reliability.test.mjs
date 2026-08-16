@@ -13,20 +13,19 @@ test("formatProgress accepts preformatted and array progress", () => {
 	assert.equal(formatProgress(preformatted), preformatted);
 });
 
-test("identity usage line lists all six tiers in fixed order", () => {
+test("identity usage line lists only consumed tiers in fixed order and stays narrow", () => {
 	const usage = {
 		"text-medium": { input: 1_234_567, output: 45_000, cacheRead: 900_000, cacheWrite: 10, cost: 0.423 },
 		"vision-low": { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, cost: 0 },
 	};
 	const line = formatIdentityUsageLine(usage);
-	assert.match(line, /^text-high 0/);
-	assert.match(line, /text-medium in 1\.2M out 45\.0k cache 900\.0k \$0\.423/);
-	assert.match(line, /text-low 0/);
-	assert.match(line, /vision-high 0/);
-	assert.match(line, /vision-medium 0/);
-	assert.match(line, /vision-low in 100 out 20 cache 0$/);
+	assert.equal(line, "text-medium 1.2M/45.0k/900.0k $0.423 | vision-low 100/20/0");
+	assert.ok(line.length <= 100, `two consumed tiers must fit, got ${line.length} chars`);
 	assert.equal(formatIdentityUsageLine(), "");
-	assert.equal(formatIdentityUsageLine({}), "text-high 0 | text-medium 0 | text-low 0 | vision-high 0 | vision-medium 0 | vision-low 0");
+	assert.equal(formatIdentityUsageLine({}), "");
+	const single = formatIdentityUsageLine({ "text-high": { input: 5_200_000, output: 1_400_000, cacheRead: 4_100_000, cacheWrite: 0, cost: 1.82 } });
+	assert.equal(single, "text-high 5.2M/1.4M/4.1M $1.82");
+	assert.ok(single.length <= 60);
 });
 
 test("token usage sums assistant, toolResult, and compaction entries", () => {

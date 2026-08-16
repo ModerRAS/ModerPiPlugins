@@ -405,7 +405,8 @@ export default function piTeamExtension(pi: ExtensionAPI): void {
 		}
 		const lines = formatAgentTree(list, focusedBossId);
 		const usageLine = formatIdentityUsageLine(identityUsage);
-		const widgetLines = [...lines, ...(usageLine ? [usageLine] : [])];
+		// non-TUI widgets render raw Text without clipping; cap each line so it cannot push past the panel width.
+		const widgetLines = [...lines, ...(usageLine ? [usageLine] : [])].map((line) => truncateToWidth(line, 160, "…"));
 		context.ui.setWidget(TEAM_WIDGET_KEY, widgetLines.length ? widgetLines : ["Pi Team: /boss <task> to start"], { placement: "belowEditor" });
 	}
 

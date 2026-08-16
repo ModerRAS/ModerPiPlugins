@@ -93,32 +93,39 @@ export function sumTokenUsage(entries: unknown[]): TokenUsage {
 }
 
 export function formatTokenUsage(usage?: TokenUsage): string {
-	if (!usage) return "";	const count = (value: number): string => {
-		if (!Number.isFinite(value) || value <= 0) return "0";
-		if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-		if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-		return String(value);
-	};
-	const cost = (value: number): string => {
-		if (!Number.isFinite(value) || value <= 0) return "$0";
-		const fixed = value >= 100 ? value.toFixed(0) : value >= 1 ? value.toFixed(2) : value >= 0.01 ? value.toFixed(4) : value.toFixed(6);
-		return `$${fixed.replace(/\.?0+$/, "")}`;
-	};
+	if (!usage) return "";
+	const count = compactCount;
+	const cost = formatCost;
 	const parts = [`in ${count(usage.input)}`, `out ${count(usage.output)}`, `cache ${count((usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0))}`];
 	if ((usage.cost ?? 0) > 0) parts.push(cost(usage.cost));
 	return parts.join(" ");
 }
 
-/** Session-wide per-identity totals: all six built-in tiers in fixed order, plus any custom identities. */
+function compactCount(value: number): string {
+	if (!Number.isFinite(value) || value <= 0) return "0";
+	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+	if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+	return String(value);
+}
+
+function formatCost(value: number): string {
+	if (!Number.isFinite(value) || value <= 0) return "$0";
+	const fixed = value >= 100 ? value.toFixed(0) : value >= 1 ? value.toFixed(2) : value >= 0.01 ? value.toFixed(4) : value.toFixed(6);
+	return `$${fixed.replace(/\.?0+$/, "")}`;
+}
+
+/** Session-wide per-identity totals: only consumed tiers, in/out/cache slash-compact to stay inside the bottom bar. */
 export function formatIdentityUsageLine(usageByIdentity: Record<string, TokenUsage> | undefined): string {
 	if (!usageByIdentity) return "";
 	const others = Object.keys(usageByIdentity).filter((key) => !(BUILTIN_IDENTITIES as readonly string[]).includes(key)).sort();
-	return [...BUILTIN_IDENTITIES, ...others]
-		.map((identity) => {
-			const usage = usageByIdentity[identity];
-			return usage ? `${identity} ${formatTokenUsage(usage)}` : `${identity} 0`;
-		})
-		.join(" | ");
+	const parts: string[] = [];
+	for (const identity of [...BUILTIN_IDENTITIES, ...others]) {
+		const usage = usageByIdentity[identity];
+		if (!usage || (!usage.input && !usage.output && !usage.cacheRead && !usage.cacheWrite && !usage.cost)) continue;
+		const base = `${compactCount(usage.input)}/${compactCount(usage.output)}/${compactCount((usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0))}`;
+		parts.push(`${identity} ${(usage.cost ?? 0) > 0 ? `${base} ${formatCost(usage.cost)}` : base}`);
+	}
+	return parts.join(" | ");
 }
 
 export function readJsonFile<T>(path: string): T | undefined {

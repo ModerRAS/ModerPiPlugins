@@ -119,7 +119,7 @@ Boss、部门主管和 Worker 都是独立的持久 Pi Session，使用当前项
 
 禁止多个 Pi 进程共同写同一个 Pi Session 文件。共享正式上下文由 Team 插件自己的事件日志提供，不由任何一个角色的 Pi Session 充当。
 
-每个角色在每次 `message_end` 事件时用事件自带的 usage 增量累计输入、输出、缓存读写和费用，随快照持久化；settled 时再读 Session 文件全量对账，把对账差值补进累计，弥补 compaction/branch summary 等不经过消息事件的用量。另外 Team 快照顶层维护一份按 identity（六档内置 + 其他）累计的 `identityUsage`，与角色累计同步更新，角色被移除后仍保留，面板最底部一行展示整个会话的模型开销。统计只读 Session 文件，不写回，也不影响角色进程。
+每个角色在每次 `message_end` 事件时用事件自带的 usage 增量累计输入、输出、缓存读写和费用，随快照持久化；settled 时再读 Session 文件全量对账，把对账差值补进累计，弥补 compaction/branch summary 等不经过消息事件的用量。另外 Team 快照顶层维护一份按 identity（六档内置 + 其他）累计的 `identityUsage`，与角色累计同步更新，角色被移除后仍保留，面板最底部一行展示整个会话的模型开销。面板行使用 `tier in/out/cache $cost` 的紧凑格式并只列有消耗的档位，非 TUI widget 行再做宽度截断，避免长行顶出面板。统计只读 Session 文件，不写回，也不影响角色进程。
 
 RPC 提供：
 
