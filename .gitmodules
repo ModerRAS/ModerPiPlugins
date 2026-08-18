@@ -1,0 +1,3 @@
+[submodule "extensions/pi-team"]
+	path = extensions/pi-team
+	url = https://github.com/ModerRAS/pi-team.git
